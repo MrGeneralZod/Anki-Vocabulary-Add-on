@@ -1,4 +1,4 @@
-import html
+﻿import html
 import hashlib
 import json
 import os
@@ -126,8 +126,21 @@ def _request_dictionary_data(word: str) -> Optional[List[Dict[str, Any]]]:
         return None
 
 
+def _cambridge_dictionary_url_slug(word: str) -> str:
+    """Build the path segment Cambridge uses for multi-word entries (e.g. break-out).
+
+    A literal space (break%20out) redirects to the wrong article (e.g. break-out-in-a-cold-sweat).
+    Hyphenated lowercase slugs match the canonical dictionary URLs.
+    """
+    s = _clean(word).lower().replace("-", " ")
+    tokens = re.findall(r"[a-z0-9']+", s)
+    if tokens:
+        return "-".join(tokens)
+    return re.sub(r"\s+", "-", _clean(word).lower())
+
+
 def _request_cambridge_html(word: str) -> Optional[str]:
-    encoded = urllib.parse.quote(word)
+    encoded = urllib.parse.quote(_cambridge_dictionary_url_slug(word), safe="-")
     urls = [
         "https://dictionary.cambridge.org/dictionary/english/" + encoded,
         "https://dictionary.cambridge.org/us/dictionary/english/" + encoded,
@@ -414,6 +427,46 @@ def _extract_cambridge_ipa(html_text: str) -> str:
     return ipa
 
 
+_DCAMBRIDGE_PHRASE_BODY_OPEN = re.compile(
+    r'<div\b[^>]*(?:\bphrase-body\b[^>]*\bdphrase_b\b|\bdphrase_b\b[^>]*\bphrase-body\b)[^>]*>',
+    re.IGNORECASE,
+)
+
+
+def _consume_cambridge_div_from(html_text: str, start: int) -> int:
+    """Index after the </div> that closes the opening <div> at start (balanced, shallow scan)."""
+    if start >= len(html_text) or html_text[start : start + 4].lower() != "<div":
+        return start
+    depth = 1
+    pos = start + 4
+    lower = html_text.lower()
+    while pos < len(html_text) and depth > 0:
+        i_open = lower.find("<div", pos)
+        i_close = lower.find("</div>", pos)
+        if i_close < 0:
+            return len(html_text)
+        if i_open >= 0 and i_open < i_close:
+            depth += 1
+            pos = i_open + 4
+        else:
+            depth -= 1
+            pos = i_close + len("</div>")
+    return pos
+
+
+def _strip_cambridge_nested_phrase_blocks(html_text: str) -> str:
+    """Drop phrase-body sections so nested expressions (e.g. break out in a sweat) are not main senses."""
+    out = html_text
+    while True:
+        m = _DCAMBRIDGE_PHRASE_BODY_OPEN.search(out)
+        if not m:
+            break
+        start = m.start()
+        end = _consume_cambridge_div_from(out, start)
+        out = out[:start] + out[end:]
+    return out
+
+
 def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
     class _CambridgeBlockParser(HTMLParser):
         def __init__(self) -> None:
@@ -544,6 +597,8 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
         def handle_data(self, data: str) -> None:
             if self._capture_kind:
                 self._capture_parts.append(data)
+
+    html_text = _strip_cambridge_nested_phrase_blocks(html_text)
 
     senses: List[Dict[str, Any]] = []
     parts = re.split(
