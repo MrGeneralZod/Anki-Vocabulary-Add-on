@@ -1,0 +1,24 @@
+{
+  "source_field": "Word",
+  "field_map": {
+    "ipa": "IPA",
+    "definition": "Definition",
+    "examples": "Examples",
+    "synonyms": "Synonyms",
+    "antonyms": "Antonyms",
+    "image": "Image"
+  },
+  "separator": "; ",
+  "overwrite_existing": false,
+  "max_definitions": 3,
+  "max_examples": 3,
+  "data_source": "custom",
+  "api_keys": {
+    "wordnik": "",
+    "merriam_webster": "",
+    "merriam_collegiate": "",
+    "merriam_sd3": ""
+  },
+  "cambridge_usage_tags_enabled": true,
+  "cambridge_usage_tag_map": {}
+}
