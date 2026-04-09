@@ -8,7 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from anki.notes import Note
 from aqt import mw
@@ -171,6 +171,83 @@ def _request_cambridge_html(word: str) -> Optional[str]:
         if ("ddef_d" in lower) or ("def-block" in lower) or ("meaning of " in lower):
             return body
     return None
+
+
+_CAMBRIDGE_THES_BUTTON_SYN = re.compile(
+    r'<span[^>]*\bclass=["\'][^"\']*\bdthesButton\b[^"\']*\bsynonym\b[^"\']*["\'][^>]*>(.*?)</span>',
+    re.IGNORECASE | re.DOTALL,
+)
+_CAMBRIDGE_THES_BUTTON_ANT = re.compile(
+    r'<span[^>]*\bclass=["\'][^"\']*\bdthesButton\b[^"\']*\bopposite\b[^"\']*["\'][^>]*>(.*?)</span>',
+    re.IGNORECASE | re.DOTALL,
+)
+# Cambridge appends a second block ("word | American Thesaurus"); skip it so lists stay short.
+_CAMBRIDGE_THES_US_SECTION_HEAD = " | American Thesaurus</h2>"
+_CAMBRIDGE_THES_MAX_WORDS = 3
+
+
+def _request_cambridge_thesaurus_html(word: str) -> Optional[str]:
+    """Fetch Cambridge Thesaurus HTML (dedicated /thesaurus/… page, not dictionary xref blocks)."""
+    encoded = urllib.parse.quote(_cambridge_dictionary_url_slug(word), safe="-")
+    urls = [
+        "https://dictionary.cambridge.org/thesaurus/" + encoded,
+        "https://dictionary.cambridge.org/us/thesaurus/" + encoded,
+    ]
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity",
+        "Referer": "https://dictionary.cambridge.org/",
+    }
+    for url in urls:
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=12) as response:
+                body = response.read().decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        if not body:
+            continue
+        lower = body.lower()
+        if ("verify you are human" in lower) or ("cf-chl" in lower):
+            continue
+        if "dthesbutton" in lower:
+            return body
+    return None
+
+
+def _extract_cambridge_thesaurus_synonyms_antonyms(html_text: str) -> Tuple[List[str], List[str]]:
+    """Parse synonym / antonym headwords from a Cambridge thesaurus page."""
+    split_at = html_text.find(_CAMBRIDGE_THES_US_SECTION_HEAD)
+    if split_at >= 0:
+        html_text = html_text[:split_at]
+
+    def _button_words(pattern) -> List[str]:
+        out: List[str] = []
+        for m in pattern.finditer(html_text):
+            raw = re.sub(r"<[^>]+>", " ", m.group(1))
+            text = _clean(html.unescape(raw))
+            if text:
+                out.append(text)
+        return out
+
+    def _unique(items: List[str]) -> List[str]:
+        seen: set[str] = set()
+        uniq: List[str] = []
+        for item in items:
+            key = item.lower()
+            if key not in seen:
+                seen.add(key)
+                uniq.append(item)
+        return uniq
+
+    syn = _unique(_button_words(_CAMBRIDGE_THES_BUTTON_SYN))[:_CAMBRIDGE_THES_MAX_WORDS]
+    ant = _unique(_button_words(_CAMBRIDGE_THES_BUTTON_ANT))[:_CAMBRIDGE_THES_MAX_WORDS]
+    return syn, ant
 
 
 def _request_wordnik_data(word: str, api_key: str) -> Optional[Dict[str, Any]]:
@@ -717,8 +794,6 @@ def _extract_from_cambridge(
 
     chosen_definitions: List[str] = []
     chosen_examples: List[str] = []
-    chosen_synonyms: List[str] = []
-    chosen_antonyms: List[str] = []
     chosen_labels: List[str] = []
     chosen_image_url = ""
     global_labels = _extract_cambridge_global_usage_labels(html_text)
@@ -727,8 +802,6 @@ def _extract_from_cambridge(
             if sense.get("definition") == selected_definition:
                 chosen_definitions = [selected_definition]
                 chosen_examples = list(sense.get("examples", []))
-                chosen_synonyms = list(sense.get("synonyms", []))
-                chosen_antonyms = list(sense.get("antonyms", []))
                 chosen_labels = list(sense.get("labels", []))
                 chosen_image_url = _clean(str(sense.get("image_url", "")))
                 break
@@ -737,14 +810,15 @@ def _extract_from_cambridge(
         chosen_definitions = unique(chosen_definitions)[:max_definitions]
         if senses:
             chosen_examples = list(senses[0].get("examples", []))
-            chosen_synonyms = list(senses[0].get("synonyms", []))
-            chosen_antonyms = list(senses[0].get("antonyms", []))
             chosen_labels = list(senses[0].get("labels", []))
             chosen_image_url = _clean(str(senses[0].get("image_url", "")))
 
     uniq_examples = unique(chosen_examples)[:max_examples]
-    uniq_synonyms = unique(chosen_synonyms)
-    uniq_antonyms = unique(chosen_antonyms)
+    thes_html = _request_cambridge_thesaurus_html(word)
+    if thes_html:
+        uniq_synonyms, uniq_antonyms = _extract_cambridge_thesaurus_synonyms_antonyms(thes_html)
+    else:
+        uniq_synonyms, uniq_antonyms = [], []
     uniq_labels = unique(chosen_labels + global_labels)
 
     examples_html = ""
