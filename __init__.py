@@ -15,7 +15,7 @@ from aqt import mw
 from aqt import gui_hooks
 from aqt.browser import Browser
 from aqt.editor import Editor
-from aqt.qt import QAction, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QMenu, Qt, QVBoxLayout, QWidget
+from aqt.qt import QAction, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QMenu, Qt, QVBoxLayout, QWidget
 from aqt.utils import askUser, showInfo, tooltip
 
 
@@ -1466,6 +1466,40 @@ def enrich_current_browser_note(editor: Editor) -> None:
         showInfo(msg)
 
 
+def copy_word_and_definition(editor: Editor) -> None:
+    if mw.col is None:
+        return
+    parent = editor.parentWindow
+    if not isinstance(parent, Browser):
+        showInfo("This button is intended for Browser note view.")
+        return
+    if editor.note is None:
+        showInfo("Select a note in Browser first.")
+        return
+
+    cfg = _read_config()
+    working_note = editor.note
+    if working_note is None:
+        showInfo("Select a note in Browser first.")
+        return
+
+    source_field = _auto_heal_source_field(cfg, working_note)
+    source_field = _resolve_note_field_name(working_note, source_field) or source_field
+    definition_field = cfg.get("field_map", {}).get("definition", "Definition")
+    definition_field = _resolve_note_field_name(working_note, definition_field) or definition_field
+
+    word = _plain_text(working_note[source_field]) if source_field in working_note else ""
+    definition = _plain_text(working_note[definition_field]) if definition_field in working_note else ""
+
+    if not word and not definition:
+        showInfo("Word and definition are empty for the current note.")
+        return
+
+    text_to_copy = f"{word}\n{definition}"
+    QApplication.clipboard().setText(text_to_copy)
+    tooltip("Copied word + definition to clipboard.")
+
+
 def open_browser_settings(browser: Browser) -> None:
     cfg = _read_config()
 
@@ -1503,6 +1537,14 @@ def _add_editor_button(buttons: List[str], editor: Editor) -> List[str]:
         label="Enrich Note",
     )
     buttons.append(button)
+    copy_button = editor.addButton(
+        icon=None,
+        cmd="copy_word_definition",
+        func=lambda ed=editor: copy_word_and_definition(ed),
+        tip="Copy word and definition to clipboard",
+        label="📋 Copy W+D",
+    )
+    buttons.append(copy_button)
     return buttons
 
 
