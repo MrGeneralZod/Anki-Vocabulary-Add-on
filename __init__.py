@@ -21,6 +21,7 @@ from aqt.utils import askUser, showInfo, tooltip
 
 MENU_LABEL = "Enrich Vocabulary Fields"
 LAST_API_ERROR = ""
+ENRICHED_CARD_FLAG = 7  # Purple flag (Ctrl+7 in Browser)
 DEFAULT_CONFIG = {
     "source_field": "Word",
     "field_map": {
@@ -75,6 +76,52 @@ def _plain_text(value: str) -> str:
     unescaped = html.unescape(value or "")
     no_tags = re.sub(r"<[^>]+>", " ", unescaped)
     return _clean(no_tags)
+
+
+def _parse_examples_list(field_value: str) -> List[str]:
+    raw = field_value or ""
+    if not _plain_text(raw):
+        return []
+    items: List[str] = []
+    for match in re.finditer(r"<li[^>]*>(.*?)</li>", raw, flags=re.IGNORECASE | re.DOTALL):
+        text = _plain_text(match.group(1))
+        if text:
+            items.append(text)
+    if items:
+        return items
+    text = _plain_text(raw)
+    return [text] if text else []
+
+
+def _merge_example_lists(existing: List[str], fetched: List[str], max_examples: int) -> List[str]:
+    merged: List[str] = []
+    seen = set()
+    for item in existing + fetched:
+        cleaned = _clean(item)
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(cleaned)
+        if len(merged) >= max_examples:
+            break
+    return merged
+
+
+def _render_examples_html(examples: List[str], word: str) -> str:
+    if not examples:
+        return ""
+    escaped_word = re.escape(word)
+    pattern = re.compile(escaped_word, flags=re.IGNORECASE) if escaped_word else None
+    rendered: List[str] = []
+    for example in examples:
+        safe_example = html.escape(example)
+        if pattern:
+            safe_example = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_example)
+        rendered.append(f"<li>{safe_example}</li>")
+    return "<ul>" + "".join(rendered) + "</ul>"
 
 
 def _resolve_note_field_name(note: Note, configured_name: str) -> Optional[str]:
@@ -417,17 +464,7 @@ def _extract_details(
     uniq_examples = unique(examples)[:max_examples]
     uniq_syn = unique(synonyms)
     uniq_ant = unique(antonyms)
-    examples_html = ""
-    if uniq_examples:
-        escaped_word = re.escape(word)
-        pattern = re.compile(escaped_word, flags=re.IGNORECASE) if escaped_word else None
-        rendered: List[str] = []
-        for example in uniq_examples:
-            safe_example = html.escape(example)
-            if pattern:
-                safe_example = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_example)
-            rendered.append(f"<li>{safe_example}</li>")
-        examples_html = "<ul>" + "".join(rendered) + "</ul>"
+    examples_html = _render_examples_html(uniq_examples, word)
 
     return {
         "ipa": ipa,
@@ -863,6 +900,8 @@ def _extract_from_cambridge(
     chosen_definitions: List[str] = []
     chosen_examples: List[str] = []
     chosen_labels: List[str] = []
+    chosen_synonyms: List[str] = []
+    chosen_antonyms: List[str] = []
     chosen_image_url = ""
     chosen_part_of_speech = ""
     global_labels = _extract_cambridge_global_usage_labels(html_text)
@@ -874,6 +913,8 @@ def _extract_from_cambridge(
                 chosen_definitions = [selected_definition]
                 chosen_examples = list(sense.get("examples", []))
                 chosen_labels = list(sense.get("labels", []))
+                chosen_synonyms = list(sense.get("synonyms", []))
+                chosen_antonyms = list(sense.get("antonyms", []))
                 chosen_image_url = _clean(str(sense.get("image_url", "")))
                 chosen_part_of_speech = _clean(str(sense.get("part_of_speech", "")))
                 break
@@ -883,28 +924,16 @@ def _extract_from_cambridge(
         if senses:
             chosen_examples = list(senses[0].get("examples", []))
             chosen_labels = list(senses[0].get("labels", []))
+            chosen_synonyms = list(senses[0].get("synonyms", []))
+            chosen_antonyms = list(senses[0].get("antonyms", []))
             chosen_image_url = _clean(str(senses[0].get("image_url", "")))
             chosen_part_of_speech = _clean(str(senses[0].get("part_of_speech", "")))
 
     uniq_examples = unique(chosen_examples)[:max_examples]
-    thes_html = _request_cambridge_thesaurus_html(word)
-    if thes_html:
-        uniq_synonyms, uniq_antonyms = _extract_cambridge_thesaurus_synonyms_antonyms(thes_html)
-    else:
-        uniq_synonyms, uniq_antonyms = [], []
+    uniq_synonyms = unique([_clean(x) for x in chosen_synonyms if _clean(x)])
+    uniq_antonyms = unique([_clean(x) for x in chosen_antonyms if _clean(x)])
     uniq_labels = unique(chosen_labels + global_labels)
-
-    examples_html = ""
-    if uniq_examples:
-        escaped_word = re.escape(word)
-        pattern = re.compile(escaped_word, flags=re.IGNORECASE) if escaped_word else None
-        rendered: List[str] = []
-        for example in uniq_examples:
-            safe_example = html.escape(example)
-            if pattern:
-                safe_example = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_example)
-            rendered.append(f"<li>{safe_example}</li>")
-        examples_html = "<ul>" + "".join(rendered) + "</ul>"
+    examples_html = _render_examples_html(uniq_examples, word)
 
     return {
         "ipa": ipa,
@@ -916,6 +945,32 @@ def _extract_from_cambridge(
         "usage_labels": separator.join(uniq_labels),
         "part_of_speech": chosen_part_of_speech,
     }
+
+
+def _flag_note_cards_purple(note: Note) -> None:
+    if mw.col is None:
+        return
+    try:
+        card_ids = note.card_ids()
+    except Exception:
+        try:
+            card_ids = mw.col.card_ids(note.id)
+        except Exception:
+            return
+    if not card_ids:
+        return
+    try:
+        mw.col.set_user_flag_for_cards(ENRICHED_CARD_FLAG, card_ids)
+        return
+    except Exception:
+        pass
+    for cid in card_ids:
+        try:
+            card = mw.col.get_card(cid)
+            card.set_user_flag(ENRICHED_CARD_FLAG)
+            mw.col.update_card(card)
+        except Exception:
+            continue
 
 
 def _apply_tags(note: Note, tags: List[str]) -> bool:
@@ -1337,11 +1392,25 @@ def _enrich_note(
         if not any(details.values()):
             return "no_api_result"
     changed = False
+    max_examples = int(cfg["max_examples"])
     for key, target_field in cfg["field_map"].items():
         value = details.get(key, "")
         if not value:
             continue
         field_overwrite = bool(cfg["overwrite_existing"]) or (source == "cambridge" and key == "image")
+        if key == "examples":
+            resolved_examples_field = _resolve_note_field_name(note, target_field)
+            if not resolved_examples_field:
+                continue
+            existing_examples = _parse_examples_list(note[resolved_examples_field])
+            fetched_examples = _parse_examples_list(value)
+            if existing_examples:
+                merged_examples = _merge_example_lists(existing_examples, fetched_examples, max_examples)
+                merged_html = _render_examples_html(merged_examples, word)
+                if merged_html and note[resolved_examples_field] != merged_html:
+                    note[resolved_examples_field] = merged_html
+                    changed = True
+                continue
         if _set_field(note, target_field, value, field_overwrite):
             changed = True
 
@@ -1357,6 +1426,7 @@ def _enrich_note(
 
     if changed:
         note.flush()
+        _flag_note_cards_purple(note)
         return "updated"
     return "skipped"
 
