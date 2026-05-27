@@ -72,6 +72,11 @@ def _clean(value: str) -> str:
     return " ".join(value.split()).strip()
 
 
+def _normalize_definition(value: str) -> str:
+    text = _clean(value)
+    return text[:-1].rstrip() if text.endswith(":") else text
+
+
 def _plain_text(value: str) -> str:
     unescaped = html.unescape(value or "")
     no_tags = re.sub(r"<[^>]+>", " ", unescaped)
@@ -386,7 +391,7 @@ def _request_datamuse_data(word: str) -> Dict[str, List[str]]:
 
 
 def _definition_choice_label(choice: Dict[str, str]) -> str:
-    definition = _clean(choice.get("definition", ""))
+    definition = _normalize_definition(choice.get("definition", ""))
     pos = _clean(choice.get("part_of_speech", ""))
     if pos and definition:
         return f"{pos}: {definition}"
@@ -422,7 +427,7 @@ def _extract_details(
             synonyms.extend(_clean(item) for item in meaning.get("synonyms", []) if _clean(item))
             antonyms.extend(_clean(item) for item in meaning.get("antonyms", []) if _clean(item))
             for d in meaning.get("definitions", []):
-                definition = _clean(d.get("definition", ""))
+                definition = _normalize_definition(d.get("definition", ""))
                 if definition:
                     definitions.append(definition)
                 example = _clean(d.get("example", ""))
@@ -453,7 +458,7 @@ def _extract_details(
             for meaning in entry.get("meanings", []):
                 pos = _clean(meaning.get("partOfSpeech", ""))
                 for d in meaning.get("definitions", []):
-                    if _clean(d.get("definition", "")) == lookup_definition:
+                    if _normalize_definition(d.get("definition", "")) == lookup_definition:
                         part_of_speech = pos
                         break
                 if part_of_speech:
@@ -537,7 +542,7 @@ def _extract_from_merriam(payload: List[Dict[str, Any]], separator: str) -> Dict
         if not definition:
             shortdef = entry.get("shortdef", [])
             if isinstance(shortdef, list) and shortdef:
-                definition = _clean(str(shortdef[0]))
+                definition = _normalize_definition(str(shortdef[0]))
         if definition:
             break
     part_of_speech = ""
@@ -806,7 +811,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
                     text = _clean(html.unescape("".join(self._capture_parts)))
                     if text:
                         if self._capture_kind == "definition":
-                            self.definition = text
+                            self.definition = _normalize_definition(text)
                         elif self._capture_kind == "example":
                             self.examples.append(text)
                         elif self._capture_kind == "synonym":
@@ -857,7 +862,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
 
         parser = _CambridgeBlockParser()
         parser.feed(part)
-        definition = _clean(parser.definition)
+        definition = _normalize_definition(parser.definition)
 
         context = html_text[max(0, start - pos_lookback) : min(len(html_text), start + pos_lookahead)]
         pos = _cambridge_part_of_speech_at(start, pos_timeline, context)
@@ -887,7 +892,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
     if parser.definition:
         fallback.append(
             {
-                "definition": parser.definition,
+                "definition": _normalize_definition(parser.definition),
                 "part_of_speech": _extract_cambridge_part_of_speech(html_text),
                 "examples": parser.examples,
                 "synonyms": parser.synonyms,
@@ -907,7 +912,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
         flags=re.IGNORECASE | re.DOTALL,
     ):
         raw = re.sub(r"<[^>]+>", " ", m.group(1))
-        definition = _clean(html.unescape(raw))
+        definition = _normalize_definition(html.unescape(raw))
         if definition and definition not in seen:
             fallback.append(
                 {
@@ -1181,7 +1186,7 @@ def _extract_definition_candidates(payload: List[Dict[str, Any]]) -> List[Dict[s
         for meaning in entry.get("meanings", []):
             pos = _clean(meaning.get("partOfSpeech", ""))
             for d in meaning.get("definitions", []):
-                definition = _clean(d.get("definition", ""))
+                definition = _normalize_definition(d.get("definition", ""))
                 if not definition:
                     continue
                 key = (definition, pos)
