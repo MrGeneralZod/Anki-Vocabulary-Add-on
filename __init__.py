@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
         "synonyms": "Synonyms",
         "antonyms": "Antonyms",
         "image": "Image",
+        "part_of_speech": "Part of speech",
     },
     "separator": "; ",
     "overwrite_existing": False,
@@ -337,6 +338,14 @@ def _request_datamuse_data(word: str) -> Dict[str, List[str]]:
     return out
 
 
+def _definition_choice_label(choice: Dict[str, str]) -> str:
+    definition = _clean(choice.get("definition", ""))
+    pos = _clean(choice.get("part_of_speech", ""))
+    if pos and definition:
+        return f"{pos}: {definition}"
+    return definition
+
+
 def _extract_details(
     payload: List[Dict[str, Any]],
     word: str,
@@ -344,6 +353,7 @@ def _extract_details(
     max_definitions: int,
     max_examples: int,
     selected_definition: Optional[str] = None,
+    selected_part_of_speech: Optional[str] = None,
 ) -> Dict[str, str]:
     ipa = ""
     definitions: List[str] = []
@@ -388,6 +398,22 @@ def _extract_details(
         uniq_defs = [selected_definition]
     else:
         uniq_defs = uniq_defs_all[:1]
+
+    part_of_speech = _clean(selected_part_of_speech or "")
+    lookup_definition = selected_definition or (uniq_defs[0] if uniq_defs else "")
+    if lookup_definition and not part_of_speech:
+        for entry in payload:
+            for meaning in entry.get("meanings", []):
+                pos = _clean(meaning.get("partOfSpeech", ""))
+                for d in meaning.get("definitions", []):
+                    if _clean(d.get("definition", "")) == lookup_definition:
+                        part_of_speech = pos
+                        break
+                if part_of_speech:
+                    break
+            if part_of_speech:
+                break
+
     uniq_examples = unique(examples)[:max_examples]
     uniq_syn = unique(synonyms)
     uniq_ant = unique(antonyms)
@@ -409,6 +435,7 @@ def _extract_details(
         "examples": examples_html,
         "synonyms": separator.join(uniq_syn),
         "antonyms": separator.join(uniq_ant),
+        "part_of_speech": part_of_speech,
     }
 
 
@@ -476,13 +503,33 @@ def _extract_from_merriam(payload: List[Dict[str, Any]], separator: str) -> Dict
                 definition = _clean(str(shortdef[0]))
         if definition:
             break
+    part_of_speech = ""
+    for entry in payload:
+        part_of_speech = _clean(entry.get("fl", ""))
+        if part_of_speech:
+            break
     return {
         "ipa": ipa,
         "definition": definition,
         "examples": "",
         "synonyms": "",
         "antonyms": "",
+        "part_of_speech": part_of_speech,
     }
+
+
+def _extract_cambridge_part_of_speech(block_html: str) -> str:
+    for pattern in (
+        r'<span[^>]*class=["\'][^"\']*\bposgram\b[^"\']*["\'][^>]*>(.*?)</span>',
+        r'<span[^>]*class=["\'][^"\']*\bpos\b[^"\']*\bdpos\b[^"\']*["\'][^>]*>(.*?)</span>',
+    ):
+        match = re.search(pattern, block_html, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        text = _clean(html.unescape(re.sub(r"<[^>]+>", " ", match.group(1))))
+        if text:
+            return text
+    return ""
 
 
 def _extract_cambridge_ipa(html_text: str) -> str:
@@ -696,6 +743,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
         senses.append(
             {
                 "definition": definition,
+                "part_of_speech": _extract_cambridge_part_of_speech(part),
                 "examples": [e for e in parser.examples if _clean(e)],
                 "synonyms": [s for s in parser.synonyms if _clean(s)],
                 "antonyms": [a for a in parser.antonyms if _clean(a)],
@@ -715,6 +763,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
         fallback.append(
             {
                 "definition": parser.definition,
+                "part_of_speech": _extract_cambridge_part_of_speech(html_text),
                 "examples": parser.examples,
                 "synonyms": parser.synonyms,
                 "antonyms": parser.antonyms,
@@ -738,6 +787,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
             fallback.append(
                 {
                     "definition": definition,
+                    "part_of_speech": "",
                     "examples": [],
                     "synonyms": [],
                     "antonyms": [],
@@ -796,6 +846,7 @@ def _extract_from_cambridge(
     chosen_examples: List[str] = []
     chosen_labels: List[str] = []
     chosen_image_url = ""
+    chosen_part_of_speech = ""
     global_labels = _extract_cambridge_global_usage_labels(html_text)
     if selected_definition:
         for sense in senses:
@@ -804,6 +855,7 @@ def _extract_from_cambridge(
                 chosen_examples = list(sense.get("examples", []))
                 chosen_labels = list(sense.get("labels", []))
                 chosen_image_url = _clean(str(sense.get("image_url", "")))
+                chosen_part_of_speech = _clean(str(sense.get("part_of_speech", "")))
                 break
     if not chosen_definitions:
         chosen_definitions = [s.get("definition", "") for s in senses if s.get("definition")]
@@ -812,6 +864,7 @@ def _extract_from_cambridge(
             chosen_examples = list(senses[0].get("examples", []))
             chosen_labels = list(senses[0].get("labels", []))
             chosen_image_url = _clean(str(senses[0].get("image_url", "")))
+            chosen_part_of_speech = _clean(str(senses[0].get("part_of_speech", "")))
 
     uniq_examples = unique(chosen_examples)[:max_examples]
     thes_html = _request_cambridge_thesaurus_html(word)
@@ -841,6 +894,7 @@ def _extract_from_cambridge(
         "antonyms": separator.join(uniq_antonyms),
         "image": (f'<img src="{html.escape(chosen_image_url, quote=True)}">' if chosen_image_url else ""),
         "usage_labels": separator.join(uniq_labels),
+        "part_of_speech": chosen_part_of_speech,
     }
 
 
@@ -974,32 +1028,32 @@ def _merge_non_empty(base: Dict[str, str], extra: Dict[str, str]) -> Dict[str, s
     return merged
 
 
-def _extract_definition_candidates(payload: List[Dict[str, Any]]) -> List[str]:
-    definitions: List[str] = []
+def _extract_definition_candidates(payload: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    choices: List[Dict[str, str]] = []
+    seen: set = set()
     for entry in payload:
         for meaning in entry.get("meanings", []):
+            pos = _clean(meaning.get("partOfSpeech", ""))
             for d in meaning.get("definitions", []):
                 definition = _clean(d.get("definition", ""))
-                if definition:
-                    definitions.append(definition)
-
-    unique_defs: List[str] = []
-    seen = set()
-    for definition in definitions:
-        if definition not in seen:
-            unique_defs.append(definition)
-            seen.add(definition)
-    return unique_defs
+                if not definition:
+                    continue
+                key = (definition, pos)
+                if key in seen:
+                    continue
+                seen.add(key)
+                choices.append({"definition": definition, "part_of_speech": pos})
+    return choices
 
 
 def _choose_definition_dialog(
-    definitions: List[str],
+    choices: List[Dict[str, str]],
     parent: Optional[QWidget] = None,
-) -> Optional[str]:
-    if not definitions:
+) -> Optional[Dict[str, str]]:
+    if not choices:
         return None
-    if len(definitions) == 1:
-        return definitions[0]
+    if len(choices) == 1:
+        return choices[0]
 
     dialog = QDialog(parent or mw)
     dialog.setWindowTitle("Choose definition")
@@ -1007,7 +1061,8 @@ def _choose_definition_dialog(
     layout = QVBoxLayout(dialog)
 
     combo = QComboBox(dialog)
-    combo.addItems(definitions)
+    for choice in choices:
+        combo.addItem(_definition_choice_label(choice))
     layout.addWidget(combo)
 
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog)
@@ -1017,7 +1072,10 @@ def _choose_definition_dialog(
 
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None
-    return combo.currentText() or None
+    idx = combo.currentIndex()
+    if idx < 0 or idx >= len(choices):
+        return None
+    return choices[idx]
 
 
 def _set_field(note: Any, field_name: str, value: str, overwrite_existing: bool) -> bool:
@@ -1059,6 +1117,7 @@ def _show_field_mapping_dialog(
         "synonyms": "Synonyms field:",
         "antonyms": "Antonyms field:",
         "image": "Image field:",
+        "part_of_speech": "Part of speech field:",
     }
     target_combos: Dict[str, QComboBox] = {}
     for key, label in map_labels.items():
@@ -1164,6 +1223,7 @@ def _enrich_note(
     cfg: Dict[str, Any],
     payload: Optional[Any] = None,
     selected_definition: Optional[str] = None,
+    selected_part_of_speech: Optional[str] = None,
 ) -> str:
     resolved_source_field = _resolve_note_field_name(note, source_field)
     if not resolved_source_field:
@@ -1173,7 +1233,15 @@ def _enrich_note(
         return "missing_source"
 
     source = cfg.get("data_source", "custom")
-    details = {"ipa": "", "definition": "", "examples": "", "synonyms": "", "antonyms": "", "image": ""}
+    details = {
+        "ipa": "",
+        "definition": "",
+        "examples": "",
+        "synonyms": "",
+        "antonyms": "",
+        "image": "",
+        "part_of_speech": "",
+    }
 
     if source == "dictionaryapi":
         actual_payload = payload or _request_dictionary_data(word)
@@ -1186,6 +1254,7 @@ def _enrich_note(
             int(cfg["max_definitions"]),
             int(cfg["max_examples"]),
             selected_definition=selected_definition,
+            selected_part_of_speech=selected_part_of_speech,
         )
     elif source == "cambridge":
         cambridge_html = payload if isinstance(payload, str) else _request_cambridge_html(word)
@@ -1231,6 +1300,7 @@ def _enrich_note(
                 int(cfg["max_definitions"]),
                 int(cfg["max_examples"]),
                 selected_definition=selected_definition,
+                selected_part_of_speech=selected_part_of_speech,
             )
         wk = _request_wordnik_data(word, cfg.get("api_keys", {}).get("wordnik", ""))
         if wk:
@@ -1423,22 +1493,36 @@ def enrich_current_browser_note(editor: Editor) -> None:
         return
 
     selected_definition = None
+    selected_part_of_speech = None
     payload = None
     if cfg.get("data_source", "custom") in ("dictionaryapi", "custom"):
         payload = _request_dictionary_data(word)
         if payload:
-            definitions = _extract_definition_candidates(payload)
-            selected_definition = _choose_definition_dialog(definitions, parent=parent)
-            if definitions and not selected_definition:
+            choices = _extract_definition_candidates(payload)
+            selected = _choose_definition_dialog(choices, parent=parent)
+            if choices and not selected:
                 return
+            if selected:
+                selected_definition = selected.get("definition", "")
+                selected_part_of_speech = selected.get("part_of_speech", "")
     elif cfg.get("data_source") == "cambridge":
         cambridge_html = _request_cambridge_html(word)
         if cambridge_html:
             senses = _extract_cambridge_senses(cambridge_html)
-            definitions = [s.get("definition", "") for s in senses if s.get("definition")]
-            selected_definition = _choose_definition_dialog(definitions, parent=parent)
-            if definitions and not selected_definition:
+            choices = [
+                {
+                    "definition": s.get("definition", ""),
+                    "part_of_speech": s.get("part_of_speech", ""),
+                }
+                for s in senses
+                if s.get("definition")
+            ]
+            selected = _choose_definition_dialog(choices, parent=parent)
+            if choices and not selected:
                 return
+            if selected:
+                selected_definition = selected.get("definition", "")
+                selected_part_of_speech = selected.get("part_of_speech", "")
             payload = cambridge_html
 
     result = _enrich_note(
@@ -1447,6 +1531,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
         cfg,
         payload=payload,
         selected_definition=selected_definition,
+        selected_part_of_speech=selected_part_of_speech,
     )
     if result == "updated":
         mw.reset()

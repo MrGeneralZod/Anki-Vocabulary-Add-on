@@ -6,7 +6,8 @@
     "examples": "Examples",
     "synonyms": "Synonyms",
     "antonyms": "Antonyms",
-    "image": "Image"
+    "image": "Image",
+    "part_of_speech": "Part of speech"
   },
   "separator": "; ",
   "overwrite_existing": false,
