@@ -575,6 +575,38 @@ def _extract_cambridge_part_of_speech(block_html: str) -> str:
     return max(candidates, key=lambda x: x[0])[1]
 
 
+def _build_cambridge_pos_timeline(html_text: str) -> List[Tuple[int, str]]:
+    markers: List[Tuple[int, str]] = []
+    patterns = (
+        r'<span[^>]*class=["\'][^"\']*\bposgram\b[^"\']*["\'][^>]*>(.*?)</span>',
+        r'<span[^>]*class=["\'][^"\']*\bpos\b[^"\']*\bdpos\b[^"\']*["\'][^>]*>(.*?)</span>',
+    )
+    for pattern in patterns:
+        for m in re.finditer(pattern, html_text, flags=re.IGNORECASE | re.DOTALL):
+            text = _clean(html.unescape(re.sub(r"<[^>]+>", " ", m.group(1))))
+            if text:
+                markers.append((m.start(), text))
+    markers.sort(key=lambda item: item[0])
+    return markers
+
+
+def _cambridge_part_of_speech_at(
+    position: int,
+    pos_timeline: List[Tuple[int, str]],
+    local_context: str,
+) -> str:
+    pos = _extract_cambridge_part_of_speech(local_context)
+    if pos:
+        return pos
+    inherited = ""
+    for idx, label in pos_timeline:
+        if idx <= position:
+            inherited = label
+        else:
+            break
+    return inherited
+
+
 def _nested_span_plain_text(html_text: str, open_end: int) -> str:
     depth = 1
     pos = open_end
@@ -811,6 +843,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
         flags=re.IGNORECASE,
     )
     starts = [m.start() for m in def_start_re.finditer(html_text)]
+    pos_timeline = _build_cambridge_pos_timeline(html_text)
 
     seen_pairs = set()
     # POS is usually adjacent to def-block, but sometimes slightly outside of it.
@@ -827,7 +860,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
         definition = _clean(parser.definition)
 
         context = html_text[max(0, start - pos_lookback) : min(len(html_text), start + pos_lookahead)]
-        pos = _extract_cambridge_part_of_speech(context)
+        pos = _cambridge_part_of_speech_at(start, pos_timeline, context)
 
         if not definition or (definition, pos) in seen_pairs:
             continue
