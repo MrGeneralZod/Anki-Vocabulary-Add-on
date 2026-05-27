@@ -519,17 +519,23 @@ def _extract_from_merriam(payload: List[Dict[str, Any]], separator: str) -> Dict
 
 
 def _extract_cambridge_part_of_speech(block_html: str) -> str:
-    for pattern in (
+    patterns = (
         r'<span[^>]*class=["\'][^"\']*\bposgram\b[^"\']*["\'][^>]*>(.*?)</span>',
         r'<span[^>]*class=["\'][^"\']*\bpos\b[^"\']*\bdpos\b[^"\']*["\'][^>]*>(.*?)</span>',
-    ):
-        match = re.search(pattern, block_html, flags=re.IGNORECASE | re.DOTALL)
-        if not match:
-            continue
-        text = _clean(html.unescape(re.sub(r"<[^>]+>", " ", match.group(1))))
-        if text:
-            return text
-    return ""
+    )
+
+    # Cambridge markup can repeat POS blocks; when we have multiple matches in
+    # the provided context, prefer the closest one (last in the text).
+    candidates: List[Tuple[int, str]] = []
+    for pattern in patterns:
+        for m in re.finditer(pattern, block_html, flags=re.IGNORECASE | re.DOTALL):
+            raw = m.group(1)
+            text = _clean(html.unescape(re.sub(r"<[^>]+>", " ", raw)))
+            if text:
+                candidates.append((m.start(), text))
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda x: x[0])[1]
 
 
 def _extract_cambridge_ipa(html_text: str) -> str:
@@ -725,25 +731,36 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
     html_text = _strip_cambridge_nested_phrase_blocks(html_text)
 
     senses: List[Dict[str, Any]] = []
-    parts = re.split(
+    def_start_re = re.compile(
         r'(?=<div[^>]*class=["\'][^"\']*\bdef-block\b[^"\']*["\'][^>]*>)',
-        html_text,
         flags=re.IGNORECASE,
     )
-    seen_definitions = set()
-    for part in parts:
-        if "def-block" not in part:
-            continue
+    starts = [m.start() for m in def_start_re.finditer(html_text)]
+
+    seen_pairs = set()
+    # POS is usually adjacent to def-block, but sometimes slightly outside of it.
+    # Use a window around each def-block start and choose the closest POS match.
+    pos_lookback = 2500
+    pos_lookahead = 800
+
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(html_text)
+        part = html_text[start:end]
+
         parser = _CambridgeBlockParser()
         parser.feed(part)
         definition = _clean(parser.definition)
-        if not definition or definition in seen_definitions:
+
+        context = html_text[max(0, start - pos_lookback) : min(len(html_text), start + pos_lookahead)]
+        pos = _extract_cambridge_part_of_speech(context)
+
+        if not definition or (definition, pos) in seen_pairs:
             continue
-        seen_definitions.add(definition)
+        seen_pairs.add((definition, pos))
         senses.append(
             {
                 "definition": definition,
-                "part_of_speech": _extract_cambridge_part_of_speech(part),
+                "part_of_speech": pos,
                 "examples": [e for e in parser.examples if _clean(e)],
                 "synonyms": [s for s in parser.synonyms if _clean(s)],
                 "antonyms": [a for a in parser.antonyms if _clean(a)],
@@ -829,6 +846,7 @@ def _extract_from_cambridge(
     max_definitions: int,
     max_examples: int,
     selected_definition: Optional[str] = None,
+    selected_part_of_speech: Optional[str] = None,
 ) -> Dict[str, str]:
     ipa = _extract_cambridge_ipa(html_text)
     senses = _extract_cambridge_senses(html_text)
@@ -850,7 +868,9 @@ def _extract_from_cambridge(
     global_labels = _extract_cambridge_global_usage_labels(html_text)
     if selected_definition:
         for sense in senses:
-            if sense.get("definition") == selected_definition:
+            if sense.get("definition") == selected_definition and (
+                not selected_part_of_speech or sense.get("part_of_speech", "") == selected_part_of_speech
+            ):
                 chosen_definitions = [selected_definition]
                 chosen_examples = list(sense.get("examples", []))
                 chosen_labels = list(sense.get("labels", []))
@@ -1267,6 +1287,7 @@ def _enrich_note(
             int(cfg["max_definitions"]),
             int(cfg["max_examples"]),
             selected_definition=selected_definition,
+            selected_part_of_speech=selected_part_of_speech,
         )
         details["image"] = _localize_cambridge_image_html(details.get("image", ""), word)
         if not any(details.values()):
