@@ -575,18 +575,56 @@ def _extract_cambridge_part_of_speech(block_html: str) -> str:
     return max(candidates, key=lambda x: x[0])[1]
 
 
+def _nested_span_plain_text(html_text: str, open_end: int) -> str:
+    depth = 1
+    pos = open_end
+    parts: List[str] = []
+    while pos < len(html_text) and depth > 0:
+        tag_start = html_text.find("<", pos)
+        if tag_start < 0:
+            parts.append(html_text[pos:])
+            break
+        parts.append(html_text[pos:tag_start])
+        if html_text[tag_start : tag_start + 2].lower() == "</":
+            depth -= 1
+            if depth == 0:
+                break
+            close_gt = html_text.find(">", tag_start)
+            pos = close_gt + 1 if close_gt >= 0 else len(html_text)
+            continue
+        close_gt = html_text.find(">", tag_start)
+        if close_gt < 0:
+            break
+        tag_chunk = html_text[tag_start : close_gt + 1]
+        if re.match(r"<\s*\w+", tag_chunk) and not tag_chunk.lower().startswith(("<!", "<?")):
+            depth += 1
+        pos = close_gt + 1
+    return _clean(html.unescape("".join(parts)))
+
+
 def _extract_cambridge_ipa(html_text: str) -> str:
     ipa = ""
-    # Prefer UK IPA, then fallback to first IPA on page.
-    uk_match = re.search(
-        r'<span class="[^"]*\buk dpron-i\b[^"]*">.*?<span class="[^"]*\bipa\b[^"]*">\s*([^<]+?)\s*</span>',
+    us_match = re.search(
+        r'<span[^>]*class=["\'][^"\']*\bus\b[^"\']*\bdpron-i\b[^"\']*["\'][^>]*>',
         html_text,
-        flags=re.IGNORECASE | re.DOTALL,
+        flags=re.IGNORECASE,
     )
-    first_match = re.search(r'<span class="[^"]*\bipa\b[^"]*">\s*([^<]+?)\s*</span>', html_text, flags=re.IGNORECASE)
-    match = uk_match or first_match
-    if match:
-        ipa = _clean(html.unescape(match.group(1)))
+    uk_scope = html_text[: us_match.start()] if us_match else html_text
+    uk_ipa_open = re.search(
+        r'<span[^>]*class=["\'][^"\']*\bipa\b[^"\']*["\'][^>]*>',
+        uk_scope,
+        flags=re.IGNORECASE,
+    )
+    if uk_ipa_open:
+        ipa = _nested_span_plain_text(uk_scope, uk_ipa_open.end())
+    if not ipa:
+        first_ipa_open = re.search(
+            r'<span[^>]*class=["\'][^"\']*\bipa\b[^"\']*["\'][^>]*>',
+            html_text,
+            flags=re.IGNORECASE,
+        )
+        if first_ipa_open:
+            ipa = _nested_span_plain_text(html_text, first_ipa_open.end())
     if ipa and not ipa.startswith("/"):
         ipa = "/" + ipa
     if ipa and not ipa.endswith("/"):
