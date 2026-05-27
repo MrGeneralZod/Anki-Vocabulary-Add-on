@@ -118,13 +118,71 @@ def _merge_example_lists(existing: List[str], fetched: List[str], max_examples: 
 def _render_examples_html(examples: List[str], word: str) -> str:
     if not examples:
         return ""
+
+    def extract_example_prefix(text: str) -> Tuple[str, str]:
+        source = _clean(text)
+        if not source:
+            return "", ""
+
+        prefixes: List[str] = []
+        idx = 0
+        length = len(source)
+        while idx < length:
+            while idx < length and source[idx].isspace():
+                idx += 1
+            if idx >= length:
+                break
+
+            opener = source[idx]
+            closer = ")" if opener == "(" else "]" if opener == "[" else ""
+            if not closer:
+                break
+            end = source.find(closer, idx + 1)
+            if end < 0:
+                break
+
+            chunk = source[idx : end + 1].strip()
+            # Short leading bracketed chunks in Cambridge examples usually encode grammar patterns.
+            if not chunk or len(chunk) > 140:
+                break
+            prefixes.append(chunk)
+            idx = end + 1
+
+        if prefixes:
+            return " ".join(prefixes), source[idx:].strip()
+
+        # Cambridge often prefixes examples with grammar patterns without brackets,
+        # e.g. "assure sb of sth The unions assured...".
+        bare_prefix = re.match(
+            r"^([a-z][a-z0-9'/-]*(?:\s+[a-z][a-z0-9'/-]*){1,7})\s+([\"“]?[A-Z].*)$",
+            source,
+        )
+        if bare_prefix:
+            prefix = _clean(bare_prefix.group(1))
+            remainder = _clean(bare_prefix.group(2))
+            if len(prefix) <= 80:
+                return prefix, remainder
+
+        return "", source
+
     escaped_word = re.escape(word)
     pattern = re.compile(escaped_word, flags=re.IGNORECASE) if escaped_word else None
     rendered: List[str] = []
     for example in examples:
-        safe_example = html.escape(example)
-        if pattern:
-            safe_example = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_example)
+        prefix, remainder = extract_example_prefix(example)
+        if prefix:
+            safe_prefix = html.escape(prefix)
+            safe_remainder = html.escape(remainder)
+            if pattern:
+                safe_prefix = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_prefix)
+                safe_remainder = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_remainder)
+            safe_example = f"<i>{safe_prefix}</i>"
+            if safe_remainder:
+                safe_example += f" {safe_remainder}"
+        else:
+            safe_example = html.escape(example)
+            if pattern:
+                safe_example = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_example)
         rendered.append(f"<li>{safe_example}</li>")
     return "<ul>" + "".join(rendered) + "</ul>"
 
