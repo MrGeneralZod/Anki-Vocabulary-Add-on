@@ -8,7 +8,10 @@
 
 		<div class="mem-field">
 			<label>Learnable</label>
-			<h2>{{Learnable}}</h2>
+			<h2>
+				{{Learnable}}
+				{{#Part of speech}}<span class="pos-tag">{{Part of speech}}</span>{{/Part of speech}}
+			</h2>
 
       {{#IPA}}
 	    <div class="ipa">{{IPA}}</div>

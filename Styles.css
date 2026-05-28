@@ -1815,3 +1815,13 @@ mjx-merror {
     opacity: 0.8;
     margin-top: 2px;
 }
+
+.pos-tag {
+  display: inline-block;
+  margin-left: 0.5rem;
+  font-size: 0.5em;
+  font-weight: 600;
+  opacity: 0.75;
+  text-transform: lowercase;
+  vertical-align: middle;
+}
