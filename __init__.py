@@ -165,24 +165,17 @@ def _render_examples_html(examples: List[str], word: str) -> str:
 
         return "", source
 
-    escaped_word = re.escape(word)
-    pattern = re.compile(escaped_word, flags=re.IGNORECASE) if escaped_word else None
     rendered: List[str] = []
     for example in examples:
         prefix, remainder = extract_example_prefix(example)
         if prefix:
             safe_prefix = html.escape(prefix)
             safe_remainder = html.escape(remainder)
-            if pattern:
-                safe_prefix = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_prefix)
-                safe_remainder = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_remainder)
             safe_example = f"<i>{safe_prefix}</i>"
             if safe_remainder:
                 safe_example += f" {safe_remainder}"
         else:
             safe_example = html.escape(example)
-            if pattern:
-                safe_example = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_example)
         rendered.append(f"<li>{safe_example}</li>")
     return "<ul>" + "".join(rendered) + "</ul>"
 
