@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
         "antonyms": "Antonyms",
         "image": "Image",
         "part_of_speech": "Part of speech",
+        "cefr": "CEFR",
     },
     "separator": "; ",
     "overwrite_existing": False,
@@ -444,9 +445,32 @@ def _request_datamuse_data(word: str) -> Dict[str, List[str]]:
 def _definition_choice_label(choice: Dict[str, str]) -> str:
     definition = _normalize_definition(choice.get("definition", ""))
     pos = _clean(choice.get("part_of_speech", ""))
-    if pos and definition:
-        return f"{pos}: {definition}"
+    cefr = _clean(choice.get("cefr", ""))
+    prefix_parts = [p for p in (cefr, pos) if p]
+    if prefix_parts and definition:
+        return f"{' · '.join(prefix_parts)}: {definition}"
     return definition
+
+
+_CAMBRIDGE_CEFR_LEVELS = frozenset({"A1", "A2", "B1", "B2", "C1", "C2"})
+
+
+def _extract_cambridge_cefr(block_html: str) -> str:
+    match = re.search(
+        r'<span[^>]*class=["\'][^"\']*\bepp-xref\b[^"\']*\bdxref\b[^"\']*\b(A1|A2|B1|B2|C1|C2)\b[^"\']*["\'][^>]*>',
+        block_html,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return match.group(1).upper()
+
+
+def _render_cefr_html(cefr: str) -> str:
+    level = _clean(cefr).upper()
+    if level not in _CAMBRIDGE_CEFR_LEVELS:
+        return ""
+    return f'<span class="cefr-tag cefr-{level.lower()}">{html.escape(level)}</span>'
 
 
 def _extract_details(
@@ -917,6 +941,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
 
         context = html_text[max(0, start - pos_lookback) : min(len(html_text), start + pos_lookahead)]
         pos = _cambridge_part_of_speech_at(start, pos_timeline, context)
+        cefr = _extract_cambridge_cefr(part)
 
         if not definition or (definition, pos) in seen_pairs:
             continue
@@ -925,6 +950,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
             {
                 "definition": definition,
                 "part_of_speech": pos,
+                "cefr": cefr,
                 "examples": [e for e in parser.examples if _clean(e)],
                 "synonyms": [s for s in parser.synonyms if _clean(s)],
                 "antonyms": [a for a in parser.antonyms if _clean(a)],
@@ -945,6 +971,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
             {
                 "definition": _normalize_definition(parser.definition),
                 "part_of_speech": _extract_cambridge_part_of_speech(html_text),
+                "cefr": _extract_cambridge_cefr(html_text),
                 "examples": parser.examples,
                 "synonyms": parser.synonyms,
                 "antonyms": parser.antonyms,
@@ -969,6 +996,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
                 {
                     "definition": definition,
                     "part_of_speech": "",
+                    "cefr": "",
                     "examples": [],
                     "synonyms": [],
                     "antonyms": [],
@@ -1031,6 +1059,7 @@ def _extract_from_cambridge(
     chosen_antonyms: List[str] = []
     chosen_image_url = ""
     chosen_part_of_speech = ""
+    chosen_cefr = ""
     global_labels = _extract_cambridge_global_usage_labels(html_text)
     if selected_definition:
         for sense in senses:
@@ -1044,6 +1073,7 @@ def _extract_from_cambridge(
                 chosen_antonyms = list(sense.get("antonyms", []))
                 chosen_image_url = _clean(str(sense.get("image_url", "")))
                 chosen_part_of_speech = _clean(str(sense.get("part_of_speech", "")))
+                chosen_cefr = _clean(str(sense.get("cefr", "")))
                 break
     if not chosen_definitions:
         chosen_definitions = [s.get("definition", "") for s in senses if s.get("definition")]
@@ -1055,6 +1085,7 @@ def _extract_from_cambridge(
             chosen_antonyms = list(senses[0].get("antonyms", []))
             chosen_image_url = _clean(str(senses[0].get("image_url", "")))
             chosen_part_of_speech = _clean(str(senses[0].get("part_of_speech", "")))
+            chosen_cefr = _clean(str(senses[0].get("cefr", "")))
 
     uniq_examples = unique(chosen_examples)[:max_examples]
     uniq_synonyms = unique([_clean(x) for x in chosen_synonyms if _clean(x)])
@@ -1071,6 +1102,7 @@ def _extract_from_cambridge(
         "image": (f'<img src="{html.escape(chosen_image_url, quote=True)}">' if chosen_image_url else ""),
         "usage_labels": separator.join(uniq_labels),
         "part_of_speech": chosen_part_of_speech,
+        "cefr": _render_cefr_html(chosen_cefr),
     }
 
 
@@ -1320,6 +1352,7 @@ def _show_field_mapping_dialog(
         "antonyms": "Antonyms field:",
         "image": "Image field:",
         "part_of_speech": "Part of speech field:",
+        "cefr": "CEFR field:",
     }
     target_combos: Dict[str, QComboBox] = {}
     for key, label in map_labels.items():
@@ -1443,6 +1476,7 @@ def _enrich_note(
         "antonyms": "",
         "image": "",
         "part_of_speech": "",
+        "cefr": "",
     }
 
     if source == "dictionaryapi":
@@ -1731,6 +1765,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
                 {
                     "definition": s.get("definition", ""),
                     "part_of_speech": s.get("part_of_speech", ""),
+                    "cefr": s.get("cefr", ""),
                 }
                 for s in senses
                 if s.get("definition")

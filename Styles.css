@@ -1825,3 +1825,29 @@ mjx-merror {
   text-transform: lowercase;
   vertical-align: middle;
 }
+
+.cefr-tag {
+  display: inline-block;
+  margin-left: 0.5rem;
+  font-size: 0.45em;
+  font-weight: 700;
+  vertical-align: middle;
+  padding: 0.15em 0.45em;
+  border-radius: 0.25em;
+  letter-spacing: 0.03em;
+  line-height: 1.2;
+}
+
+.cefr-a1 { background: #dcfce7; color: #166534; }
+.cefr-a2 { background: #ccfbf1; color: #0f766e; }
+.cefr-b1 { background: #dbeafe; color: #1d4ed8; }
+.cefr-b2 { background: #e0e7ff; color: #3730a3; }
+.cefr-c1 { background: #fef3c7; color: #b45309; }
+.cefr-c2 { background: #fee2e2; color: #991b1b; }
+
+body:is(.nightMode, .night_mode) .cefr-a1 { background: #14532d; color: #bbf7d0; }
+body:is(.nightMode, .night_mode) .cefr-a2 { background: #134e4a; color: #99f6e4; }
+body:is(.nightMode, .night_mode) .cefr-b1 { background: #1e3a8a; color: #bfdbfe; }
+body:is(.nightMode, .night_mode) .cefr-b2 { background: #312e81; color: #c7d2fe; }
+body:is(.nightMode, .night_mode) .cefr-c1 { background: #78350f; color: #fde68a; }
+body:is(.nightMode, .night_mode) .cefr-c2 { background: #7f1d1d; color: #fecaca; }

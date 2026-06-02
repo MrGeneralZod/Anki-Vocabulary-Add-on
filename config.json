@@ -7,7 +7,8 @@
     "synonyms": "Synonyms",
     "antonyms": "Antonyms",
     "image": "Image",
-    "part_of_speech": "Part of speech"
+    "part_of_speech": "Part of speech",
+    "cefr": "CEFR"
   },
   "separator": "; ",
   "overwrite_existing": false,
