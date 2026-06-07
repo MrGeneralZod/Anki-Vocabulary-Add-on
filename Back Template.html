@@ -11,7 +11,7 @@
 			<h2>
 				{{Learnable}}
 				{{#Part of speech}}<span class="pos-tag">{{Part of speech}}</span>{{/Part of speech}}
-				{{#CEFR}}{{CEFR}}{{/CEFR}}
+				{{#CEFR}}<span class="cefr-field">{{CEFR}}</span>{{/CEFR}}
 			</h2>
 
       {{#IPA}}
@@ -453,7 +453,11 @@ document.querySelectorAll('.card-content.back a.replay-button').forEach((a) => {
 
 <!-- -------------------⚙️ user posterior scripts ⚙️------------------ -->
 <script>
-  //place your scripts here
-
-
+(function () {
+  const el = document.querySelector('.cefr-field');
+  if (!el || el.querySelector('.cefr-tag')) return;
+  const level = (el.textContent || '').trim().toUpperCase();
+  if (!/^(A1|A2|B1|B2|C1|C2)$/.test(level)) return;
+  el.innerHTML = '<span class="cefr-tag cefr-' + level.toLowerCase() + '">' + level + '</span>';
+})();
 </script>

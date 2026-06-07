@@ -1826,6 +1826,10 @@ mjx-merror {
   vertical-align: middle;
 }
 
+.cefr-field {
+  display: inline;
+}
+
 .cefr-tag {
   display: inline-block;
   margin-left: 0.5rem;

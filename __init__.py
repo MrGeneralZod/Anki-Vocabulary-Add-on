@@ -21,6 +21,8 @@ from aqt.utils import askUser, showInfo, tooltip
 
 MENU_LABEL = "Enrich Vocabulary Fields"
 LAST_API_ERROR = ""
+LAST_IMAGE_GEN_ERROR = ""
+DEFAULT_IMAGE_GENERATION_API_URL = "https://free-image-generation-api.lokiyan1996.workers.dev/"
 ENRICHED_CARD_FLAG = 7  # Purple flag (Ctrl+7 in Browser)
 DEFAULT_CONFIG = {
     "source_field": "Word",
@@ -44,9 +46,11 @@ DEFAULT_CONFIG = {
         "merriam_webster": "",
         "merriam_collegiate": "",
         "merriam_sd3": "",
+        "image_generation": "",
     },
     "cambridge_usage_tags_enabled": True,
     "cambridge_usage_tag_map": {},
+    "image_generation_api_url": DEFAULT_IMAGE_GENERATION_API_URL,
 }
 
 
@@ -452,9 +456,6 @@ def _definition_choice_label(choice: Dict[str, str]) -> str:
     return definition
 
 
-_CAMBRIDGE_CEFR_LEVELS = frozenset({"A1", "A2", "B1", "B2", "C1", "C2"})
-
-
 def _extract_cambridge_cefr(block_html: str) -> str:
     match = re.search(
         r'<span[^>]*class=["\'][^"\']*\bepp-xref\b[^"\']*\bdxref\b[^"\']*\b(A1|A2|B1|B2|C1|C2)\b[^"\']*["\'][^>]*>',
@@ -464,13 +465,6 @@ def _extract_cambridge_cefr(block_html: str) -> str:
     if not match:
         return ""
     return match.group(1).upper()
-
-
-def _render_cefr_html(cefr: str) -> str:
-    level = _clean(cefr).upper()
-    if level not in _CAMBRIDGE_CEFR_LEVELS:
-        return ""
-    return f'<span class="cefr-tag cefr-{level.lower()}">{html.escape(level)}</span>'
 
 
 def _extract_details(
@@ -1102,7 +1096,7 @@ def _extract_from_cambridge(
         "image": (f'<img src="{html.escape(chosen_image_url, quote=True)}">' if chosen_image_url else ""),
         "usage_labels": separator.join(uniq_labels),
         "part_of_speech": chosen_part_of_speech,
-        "cefr": _render_cefr_html(chosen_cefr),
+        "cefr": chosen_cefr.upper() if chosen_cefr else "",
     }
 
 
@@ -1227,6 +1221,137 @@ def _localize_cambridge_image_html(image_html: str, word: str) -> str:
     if not local_filename:
         return image_html
     return f'<img src="{html.escape(local_filename, quote=True)}">'
+
+
+def _image_generation_ext_for_bytes(data: bytes, content_type: str) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
+        return ".webp"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    ct = content_type.lower()
+    if "png" in ct:
+        return ".png"
+    if "webp" in ct:
+        return ".webp"
+    if "gif" in ct:
+        return ".gif"
+    if "jpeg" in ct or "jpg" in ct:
+        return ".jpg"
+    return ".png"
+
+
+def _save_image_bytes_to_media(data: bytes, word: str, prefix: str, content_type: str = "") -> Optional[str]:
+    if mw.col is None or not data:
+        return None
+    ext = _image_generation_ext_for_bytes(data, content_type)
+    safe_word = re.sub(r"[^a-zA-Z0-9_-]+", "_", word).strip("_") or "word"
+    digest = hashlib.md5(data).hexdigest()[:10]
+    filename = f"{prefix}_{safe_word}_{digest}{ext}"
+
+    media = mw.col.media
+    try:
+        if hasattr(media, "write_data"):
+            media.write_data(filename, data)
+            return filename
+    except Exception:
+        pass
+
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(data)
+            temp_path = tmp.name
+        added = media.add_file(temp_path)
+        return os.path.basename(added) if added else None
+    except Exception:
+        return None
+    finally:
+        try:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+        except Exception:
+            pass
+
+
+def _image_generation_auth_header(token: str) -> str:
+    cleaned = _clean(token)
+    if not cleaned:
+        return ""
+    if cleaned.lower().startswith("bearer "):
+        return cleaned
+    return f"Bearer {cleaned}"
+
+
+def _build_vocab_image_prompt(word: str, definition: str) -> str:
+    return (
+        "Create a simple flat design vector illustration for English vocabulary learning.\n\n"
+        f"WORD: {_clean(word)}\n"
+        f"MEANING: {_clean(definition)}\n\n"
+        "Requirements:\n"
+        "- Style: minimalist flat design, simple vector illustration\n"
+        "- Composition: one central object or simple scene that clearly represents the meaning\n"
+        "- Colors: bright but limited palette (4-5 colors maximum)\n"
+        "- NO text, NO labels, NO translations, NO arrows or explanatory elements\n"
+        "- Image should be self-explanatory and unambiguous\n"
+        "- Target audience: adult English learners (A2-B2 level)\n"
+        "- Focus on the specific meaning provided, avoid abstract interpretations\n\n"
+        "Technical specs:\n"
+        "- Square format\n"
+        "- Clean, educational style\n"
+        "- Minimal details, maximum clarity"
+    )
+
+
+def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Optional[bytes], str]:
+    global LAST_IMAGE_GEN_ERROR
+    LAST_IMAGE_GEN_ERROR = ""
+    url = _clean(api_url) or DEFAULT_IMAGE_GENERATION_API_URL
+    auth = _image_generation_auth_header(token)
+    if not auth:
+        LAST_IMAGE_GEN_ERROR = "Image generation API token is not configured."
+        return None, ""
+    body = json.dumps({"prompt": prompt}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": auth,
+            "Content-Type": "application/json",
+            "Accept": "image/*,application/json",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
+            ),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as response:
+            data = response.read()
+            content_type = str(response.headers.get("Content-Type", "")).lower()
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        LAST_IMAGE_GEN_ERROR = f"HTTP {exc.code}: {detail or exc.reason}"
+        return None, ""
+    except Exception as exc:
+        LAST_IMAGE_GEN_ERROR = str(exc)
+        return None, ""
+    if not data:
+        LAST_IMAGE_GEN_ERROR = "Empty image response from API."
+        return None, ""
+    if "json" in content_type or (data[:1] == b"{" and b"error" in data[:200].lower()):
+        LAST_IMAGE_GEN_ERROR = data.decode("utf-8", errors="replace")[:300]
+        return None, ""
+    return data, content_type
 
 
 def _find_existing_emoji_variant(base_label_tag: str) -> Optional[str]:
@@ -1394,6 +1519,15 @@ def _show_field_mapping_dialog(
     merriam_legacy_key.setText(cfg.get("api_keys", {}).get("merriam_webster", ""))
     form.addRow("Merriam legacy key (optional):", merriam_legacy_key)
 
+    image_api_url = QLineEdit(dialog)
+    image_api_url.setText(cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL))
+    form.addRow("Image API URL:", image_api_url)
+
+    image_api_token = QLineEdit(dialog)
+    image_api_token.setEchoMode(QLineEdit.EchoMode.Password)
+    image_api_token.setText(cfg.get("api_keys", {}).get("image_generation", ""))
+    form.addRow("Image API token:", image_api_token)
+
     def update_api_visibility() -> None:
         selected = data_source_combo.currentText()
         wordnik_key.setVisible(selected in ("wordnik", "custom"))
@@ -1427,11 +1561,13 @@ def _show_field_mapping_dialog(
         "field_map": field_map,
         "overwrite_existing": overwrite_checkbox.isChecked(),
         "data_source": data_source_combo.currentText(),
+        "image_generation_api_url": _clean(image_api_url.text()) or DEFAULT_IMAGE_GENERATION_API_URL,
         "api_keys": {
             "wordnik": _clean(wordnik_key.text()),
             "merriam_webster": _clean(merriam_legacy_key.text()),
             "merriam_collegiate": _clean(merriam_collegiate_key.text()),
             "merriam_sd3": _clean(merriam_sd3_key.text()),
+            "image_generation": _clean(image_api_token.text()),
         },
     }
 
@@ -1443,12 +1579,15 @@ def _persist_field_choices(
     overwrite_existing: bool,
     data_source: str,
     api_keys: Dict[str, str],
+    image_generation_api_url: Optional[str] = None,
 ) -> None:
     cfg["source_field"] = source_field
     cfg["field_map"] = field_map
     cfg["overwrite_existing"] = overwrite_existing
     cfg["data_source"] = data_source
     cfg["api_keys"] = api_keys
+    if image_generation_api_url:
+        cfg["image_generation_api_url"] = image_generation_api_url
     mw.addonManager.writeConfig(__name__, cfg)
 
 
@@ -1838,6 +1977,87 @@ def copy_word_and_definition(editor: Editor) -> None:
     tooltip("Copied word + definition to clipboard.")
 
 
+def generate_image_for_current_note(editor: Editor) -> None:
+    if mw.col is None:
+        return
+    parent = editor.parentWindow
+    if not isinstance(parent, Browser):
+        showInfo("This button is intended for Browser note view.")
+        return
+    if editor.note is None:
+        showInfo("Select a note in Browser first.")
+        return
+
+    cfg = _read_config()
+    working_note = editor.note
+    try:
+        editor.saveNow(lambda: None)
+    except Exception:
+        pass
+    try:
+        db_note = mw.col.get_note(working_note.id)
+        if db_note is not None:
+            working_note = db_note
+    except Exception:
+        pass
+    if working_note is None:
+        showInfo("Select a note in Browser first.")
+        return
+
+    source_field = _resolve_note_field_name(
+        working_note,
+        _auto_heal_source_field(cfg, working_note),
+    )
+    definition_field = _resolve_note_field_name(
+        working_note,
+        cfg.get("field_map", {}).get("definition", "Definition"),
+    )
+    image_field = _resolve_note_field_name(working_note, cfg.get("field_map", {}).get("image", "Image"))
+
+    if not image_field:
+        showInfo("Image field is not configured. Open Browse -> losev -> Settings.")
+        return
+
+    word = _plain_text(working_note[source_field]) if source_field and source_field in working_note else ""
+    definition = (
+        _plain_text(working_note[definition_field])
+        if definition_field and definition_field in working_note
+        else ""
+    )
+    if not word:
+        showInfo("Word field is empty. Fill the source word before generating an image.")
+        return
+    if not definition:
+        showInfo("Definition field is empty. Add a definition before generating an image.")
+        return
+
+    prompt = _build_vocab_image_prompt(word, definition)
+    api_url = cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)
+    token = cfg.get("api_keys", {}).get("image_generation", "")
+
+    mw.progress.start(label="Generating image...", max=0)
+    try:
+        image_data, content_type = _request_generated_image(prompt, api_url, token)
+    finally:
+        mw.progress.finish()
+
+    if not image_data:
+        showInfo(f"Image generation failed.\n\n{LAST_IMAGE_GEN_ERROR or 'Unknown error.'}")
+        return
+
+    local_filename = _save_image_bytes_to_media(image_data, word, "generated", content_type)
+    if not local_filename:
+        showInfo("Could not save the generated image to the media folder.")
+        return
+
+    working_note[image_field] = f'<img src="{html.escape(local_filename, quote=True)}">'
+    working_note.flush()
+    _flag_note_cards_purple(working_note)
+    mw.reset()
+    editor.loadNoteKeepingFocus()
+    tooltip("Image generated and saved to the note.")
+
+
 def open_browser_settings(browser: Browser) -> None:
     cfg = _read_config()
 
@@ -1860,6 +2080,7 @@ def open_browser_settings(browser: Browser) -> None:
         bool(choices["overwrite_existing"]),
         choices["data_source"],
         choices["api_keys"],
+        choices.get("image_generation_api_url"),
     )
     tooltip("Settings saved.")
 
@@ -1883,6 +2104,14 @@ def _add_editor_button(buttons: List[str], editor: Editor) -> List[str]:
         label="📋 Copy W+D",
     )
     buttons.append(copy_button)
+    image_button = editor.addButton(
+        icon=None,
+        cmd="generate_vocab_image",
+        func=lambda ed=editor: generate_image_for_current_note(ed),
+        tip="Generate a vocabulary illustration from word and definition",
+        label="Generate images",
+    )
+    buttons.append(image_button)
     return buttons
 
 
