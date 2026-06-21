@@ -16,6 +16,7 @@ from aqt import gui_hooks
 from aqt.browser import Browser
 from aqt.editor import Editor
 from aqt.qt import QAction, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QMenu, Qt, QVBoxLayout, QWidget
+from aqt.operations import QueryOp
 from aqt.utils import askUser, showInfo, tooltip
 
 
@@ -2030,28 +2031,40 @@ def generate_image_for_current_note(editor: Editor) -> None:
     prompt = _build_vocab_image_prompt(word, definition)
     api_url = cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)
     token = cfg.get("api_keys", {}).get("image_generation", "")
+    note_id = working_note.id
 
-    mw.progress.start(label="Generating image...", max=0)
-    try:
-        image_data, content_type = _request_generated_image(prompt, api_url, token)
-    finally:
-        mw.progress.finish()
+    def op(_col: Any) -> Tuple[Optional[bytes], str]:
+        return _request_generated_image(prompt, api_url, token)
 
-    if not image_data:
-        showInfo(f"Image generation failed.\n\n{LAST_IMAGE_GEN_ERROR or 'Unknown error.'}")
-        return
+    def on_success(result: Tuple[Optional[bytes], str]) -> None:
+        image_data, content_type = result
+        if not image_data:
+            showInfo(f"Image generation failed.\n\n{LAST_IMAGE_GEN_ERROR or 'Unknown error.'}")
+            return
+        if mw.col is None:
+            return
+        try:
+            note = mw.col.get_note(note_id)
+        except Exception:
+            showInfo("Note no longer available.")
+            return
+        local_filename = _save_image_bytes_to_media(image_data, word, "generated", content_type)
+        if not local_filename:
+            showInfo("Could not save the generated image to the media folder.")
+            return
+        note[image_field] = f'<img src="{html.escape(local_filename, quote=True)}">'
+        note.flush()
+        _flag_note_cards_purple(note)
+        mw.reset()
+        if editor.note is not None and editor.note.id == note_id:
+            editor.loadNoteKeepingFocus()
+        tooltip("Image generated and saved to the note.")
 
-    local_filename = _save_image_bytes_to_media(image_data, word, "generated", content_type)
-    if not local_filename:
-        showInfo("Could not save the generated image to the media folder.")
-        return
-
-    working_note[image_field] = f'<img src="{html.escape(local_filename, quote=True)}">'
-    working_note.flush()
-    _flag_note_cards_purple(working_note)
-    mw.reset()
-    editor.loadNoteKeepingFocus()
-    tooltip("Image generated and saved to the note.")
+    QueryOp(
+        parent=parent,
+        op=op,
+        success=on_success,
+    ).with_progress("Generating image...").without_collection().run_in_background()
 
 
 def open_browser_settings(browser: Browser) -> None:
