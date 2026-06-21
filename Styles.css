@@ -1826,6 +1826,57 @@ mjx-merror {
   vertical-align: middle;
 }
 
+/* Front-only styled part-of-speech badge (hidden on back via FrontSide embed) */
+#backwrap .pos-front-field {
+  display: none;
+}
+
+.card-content.front .pos-front-field {
+  margin-top: 0.65rem;
+  text-align: center;
+}
+
+.card-content.front .pos-front-tag {
+  display: inline-block;
+  font-size: 0.72em;
+  font-weight: 700;
+  padding: 0.22em 0.6em;
+  border-radius: 0.35em;
+  letter-spacing: 0.03em;
+  line-height: 1.2;
+  text-transform: lowercase;
+}
+
+.card-content.front .pos-front-noun { background: #dbeafe; color: #1d4ed8; }
+.card-content.front .pos-front-verb { background: #dcfce7; color: #166534; }
+.card-content.front .pos-front-adjective { background: #f3e8ff; color: #7e22ce; }
+.card-content.front .pos-front-adverb { background: #fef3c7; color: #b45309; }
+.card-content.front .pos-front-phrasal-verb { background: #ccfbf1; color: #0f766e; }
+.card-content.front .pos-front-modal-verb { background: #e0e7ff; color: #3730a3; }
+.card-content.front .pos-front-pronoun { background: #fce7f3; color: #be185d; }
+.card-content.front .pos-front-preposition { background: #f1f5f9; color: #475569; }
+.card-content.front .pos-front-conjunction { background: #ecfeff; color: #0e7490; }
+.card-content.front .pos-front-interjection,
+.card-content.front .pos-front-exclamation { background: #fee2e2; color: #991b1b; }
+.card-content.front .pos-front-determiner { background: #f5f5f4; color: #57534e; }
+.card-content.front .pos-front-phrase { background: #cffafe; color: #0e7490; }
+.card-content.front .pos-front-other { background: #f3f4f6; color: #4b5563; }
+
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-noun { background: #1e3a8a; color: #bfdbfe; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-verb { background: #14532d; color: #bbf7d0; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-adjective { background: #581c87; color: #e9d5ff; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-adverb { background: #78350f; color: #fde68a; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-phrasal-verb { background: #134e4a; color: #99f6e4; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-modal-verb { background: #312e81; color: #c7d2fe; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-pronoun { background: #831843; color: #fbcfe8; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-preposition { background: #334155; color: #cbd5e1; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-conjunction { background: #164e63; color: #a5f3fc; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-interjection,
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-exclamation { background: #7f1d1d; color: #fecaca; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-determiner { background: #44403c; color: #d6d3d1; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-phrase { background: #155e75; color: #a5f3fc; }
+body:is(.nightMode, .night_mode) .card-content.front .pos-front-other { background: #374151; color: #d1d5db; }
+
 .cefr-field {
   display: inline;
 }
