@@ -34,6 +34,7 @@ DEFAULT_CONFIG = {
         "synonyms": "Synonyms",
         "antonyms": "Antonyms",
         "image": "Image",
+        "audio": "Audio",
         "part_of_speech": "Part of speech",
         "cefr": "CEFR",
     },
@@ -739,6 +740,88 @@ def _extract_cambridge_ipa(html_text: str) -> str:
     return ipa
 
 
+def _extract_cambridge_headword_scope(html_text: str, word: str) -> str:
+    word_clean = re.escape(word.strip())
+    slug_clean = re.escape(_cambridge_dictionary_url_slug(word))
+    for pattern in (
+        rf'<span[^>]*class=["\'][^"\']*\bhw\b[^"\']*["\'][^>]*>\s*{word_clean}\s*</span>',
+        rf'<span[^>]*class=["\'][^"\']*\bhw\b[^"\']*["\'][^>]*>\s*{slug_clean}\s*</span>',
+    ):
+        match = re.search(pattern, html_text, flags=re.IGNORECASE)
+        if match:
+            start = max(0, match.start() - 200)
+            end = min(len(html_text), match.end() + 4000)
+            return html_text[start:end]
+    return ""
+
+
+def _extract_cambridge_uk_audio_url_from_scope(html_text: str) -> str:
+    uk_open = re.search(
+        r'<span[^>]*class=["\'][^"\']*\buk\b[^"\']*\bdpron-i\b[^"\']*["\'][^>]*>',
+        html_text,
+        flags=re.IGNORECASE,
+    )
+    if not uk_open:
+        return ""
+
+    uk_end = min(len(html_text), uk_open.start() + 2500)
+    uk_chunk = html_text[uk_open.start() : uk_end]
+
+    mp3_match = re.search(
+        r'<source[^>]*type=["\']audio/mpeg["\'][^>]*src=["\']([^"\']+)["\']',
+        uk_chunk,
+        flags=re.IGNORECASE,
+    )
+    if not mp3_match:
+        mp3_match = re.search(
+            r'<source[^>]*src=["\']([^"\']+\.mp3)["\'][^>]*type=["\']audio/mpeg["\']',
+            uk_chunk,
+            flags=re.IGNORECASE,
+        )
+    if not mp3_match:
+        mp3_match = re.search(
+            r'<source[^>]*src=["\']([^"\']+\.mp3)["\']',
+            uk_chunk,
+            flags=re.IGNORECASE,
+        )
+    if not mp3_match:
+        return ""
+
+    src = _clean(html.unescape(mp3_match.group(1)))
+    if not src:
+        return ""
+    if src.startswith("//"):
+        src = "https:" + src
+    elif src.startswith("/"):
+        src = "https://dictionary.cambridge.org" + src
+    return src if src.startswith(("http://", "https://")) else ""
+
+
+def _extract_cambridge_uk_audio_url(html_text: str, word: str = "") -> str:
+    scopes: List[str] = []
+    if word:
+        headword_scope = _extract_cambridge_headword_scope(html_text, word)
+        if headword_scope:
+            scopes.append(headword_scope)
+    scopes.append(html_text)
+    for scope in scopes:
+        audio_url = _extract_cambridge_uk_audio_url_from_scope(scope)
+        if audio_url:
+            return audio_url
+    return ""
+
+
+def _supplement_cambridge_pronunciation(word: str, details: Dict[str, str]) -> Dict[str, str]:
+    cambridge_html = _request_cambridge_html(word)
+    if not cambridge_html:
+        return details
+    if not details.get("ipa"):
+        details["ipa"] = _extract_cambridge_ipa(cambridge_html)
+    if not details.get("audio"):
+        details["audio"] = _extract_cambridge_uk_audio_url(cambridge_html, word)
+    return details
+
+
 _DCAMBRIDGE_PHRASE_BODY_OPEN = re.compile(
     r'<div\b[^>]*(?:\bphrase-body\b[^>]*\bdphrase_b\b|\bdphrase_b\b[^>]*\bphrase-body\b)[^>]*>',
     re.IGNORECASE,
@@ -1036,6 +1119,7 @@ def _extract_from_cambridge(
     selected_part_of_speech: Optional[str] = None,
 ) -> Dict[str, str]:
     ipa = _extract_cambridge_ipa(html_text)
+    audio_url = _extract_cambridge_uk_audio_url(html_text, word)
     senses = _extract_cambridge_senses(html_text)
 
     def unique(items: List[str]) -> List[str]:
@@ -1090,6 +1174,7 @@ def _extract_from_cambridge(
 
     return {
         "ipa": ipa,
+        "audio": audio_url,
         "definition": separator.join(chosen_definitions),
         "examples": examples_html,
         "synonyms": separator.join(uniq_synonyms),
@@ -1125,6 +1210,24 @@ def _flag_note_cards_purple(note: Note) -> None:
             mw.col.update_card(card)
         except Exception:
             continue
+
+
+def _refresh_browser_after_note_change(browser: Browser, editor: Editor, note: Note) -> None:
+    """Sync note changes into the browser editor without resetting the main window."""
+    if editor.note is not None and editor.note.id == note.id:
+        for field_name in note.keys():
+            editor.note[field_name] = note[field_name]
+        editor.loadNoteKeepingFocus()
+    try:
+        browser.table.redraw_cells()
+    except Exception:
+        pass
+    try:
+        browser._renderPreview()
+    except Exception:
+        pass
+    browser.raise_()
+    browser.activateWindow()
 
 
 def _apply_tags(note: Note, tags: List[str]) -> bool:
@@ -1222,6 +1325,83 @@ def _localize_cambridge_image_html(image_html: str, word: str) -> str:
     if not local_filename:
         return image_html
     return f'<img src="{html.escape(local_filename, quote=True)}">'
+
+
+def _download_cambridge_audio_to_media(audio_url: str, word: str) -> Optional[str]:
+    if mw.col is None or not audio_url:
+        return None
+    req = urllib.request.Request(
+        audio_url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
+            ),
+            "Accept": "audio/mpeg,audio/*,*/*;q=0.8",
+            "Referer": "https://dictionary.cambridge.org/",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = response.read()
+            content_type = str(response.headers.get("Content-Type", "")).lower()
+    except Exception:
+        return None
+    if not data:
+        return None
+    if content_type and ("audio/" not in content_type) and ("mpeg" not in content_type) and ("octet-stream" not in content_type):
+        return None
+
+    parsed = urllib.parse.urlparse(audio_url)
+    ext = os.path.splitext(parsed.path)[1].lower()
+    if ext not in (".mp3", ".ogg", ".wav", ".m4a"):
+        if "ogg" in content_type:
+            ext = ".ogg"
+        elif "wav" in content_type:
+            ext = ".wav"
+        elif "mp4" in content_type or "m4a" in content_type:
+            ext = ".m4a"
+        else:
+            ext = ".mp3"
+
+    safe_word = re.sub(r"[^a-zA-Z0-9_-]+", "_", word).strip("_") or "word"
+    digest = hashlib.md5(audio_url.encode("utf-8")).hexdigest()[:10]
+    filename = f"cambridge_{safe_word}_{digest}{ext}"
+
+    media = mw.col.media
+    try:
+        if hasattr(media, "write_data"):
+            media.write_data(filename, data)
+            return filename
+    except Exception:
+        pass
+
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(data)
+            temp_path = tmp.name
+        added = media.add_file(temp_path)
+        return os.path.basename(added) if added else None
+    except Exception:
+        return None
+    finally:
+        try:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+        except Exception:
+            pass
+
+
+def _localize_cambridge_audio(audio_url: str, word: str) -> str:
+    remote_url = _clean(audio_url)
+    if not remote_url or not remote_url.startswith(("http://", "https://")):
+        return ""
+    local_filename = _download_cambridge_audio_to_media(remote_url, word)
+    if not local_filename:
+        return ""
+    return f"[sound:{local_filename}]"
 
 
 def _image_generation_ext_for_bytes(data: bytes, content_type: str) -> str:
@@ -1473,6 +1653,7 @@ def _show_field_mapping_dialog(
         "synonyms": "Synonyms field:",
         "antonyms": "Antonyms field:",
         "image": "Image field:",
+        "audio": "Audio field:",
         "part_of_speech": "Part of speech field:",
         "cefr": "CEFR field:",
     }
@@ -1611,6 +1792,7 @@ def _enrich_note(
         "synonyms": "",
         "antonyms": "",
         "image": "",
+        "audio": "",
         "part_of_speech": "",
         "cefr": "",
     }
@@ -1642,6 +1824,7 @@ def _enrich_note(
             selected_part_of_speech=selected_part_of_speech,
         )
         details["image"] = _localize_cambridge_image_html(details.get("image", ""), word)
+        details["audio"] = _localize_cambridge_audio(details.get("audio", ""), word)
         if not any(details.values()):
             return "no_api_result"
     elif source == "wordnik":
@@ -1686,6 +1869,9 @@ def _enrich_note(
             details["synonyms"] = cfg["separator"].join(dm["synonyms"])
         if dm.get("antonyms") and not details.get("antonyms"):
             details["antonyms"] = cfg["separator"].join(dm["antonyms"])
+        details = _supplement_cambridge_pronunciation(word, details)
+        if details.get("audio"):
+            details["audio"] = _localize_cambridge_audio(details.get("audio", ""), word)
         if not any(details.values()):
             return "no_api_result"
     changed = False
@@ -1694,7 +1880,9 @@ def _enrich_note(
         value = details.get(key, "")
         if not value:
             continue
-        field_overwrite = bool(cfg["overwrite_existing"]) or (source == "cambridge" and key == "image")
+        field_overwrite = bool(cfg["overwrite_existing"]) or (
+            source == "cambridge" and key in ("image", "audio")
+        ) or (key == "audio" and bool(value))
         if key == "examples":
             resolved_examples_field = _resolve_note_field_name(note, target_field)
             if not resolved_examples_field:
@@ -1708,7 +1896,10 @@ def _enrich_note(
                     note[resolved_examples_field] = merged_html
                     changed = True
                 continue
-        if _set_field(note, target_field, value, field_overwrite):
+        resolved_field = _resolve_note_field_name(note, target_field)
+        if not resolved_field:
+            continue
+        if _set_field(note, resolved_field, value, field_overwrite):
             changed = True
 
     if source == "cambridge" and bool(cfg.get("cambridge_usage_tags_enabled", True)):
@@ -1923,8 +2114,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
         selected_part_of_speech=selected_part_of_speech,
     )
     if result == "updated":
-        mw.reset()
-        editor.loadNoteKeepingFocus()
+        _refresh_browser_after_note_change(parent, editor, working_note)
         tooltip("Current note updated.")
     elif result == "skipped":
         showInfo("Nothing changed (fields already filled or no values found).")
@@ -2055,9 +2245,7 @@ def generate_image_for_current_note(editor: Editor) -> None:
         note[image_field] = f'<img src="{html.escape(local_filename, quote=True)}">'
         note.flush()
         _flag_note_cards_purple(note)
-        mw.reset()
-        if editor.note is not None and editor.note.id == note_id:
-            editor.loadNoteKeepingFocus()
+        _refresh_browser_after_note_change(parent, editor, note)
         tooltip("Image generated and saved to the note.")
 
     QueryOp(
