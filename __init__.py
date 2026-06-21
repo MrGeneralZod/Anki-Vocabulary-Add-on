@@ -740,7 +740,22 @@ def _extract_cambridge_ipa(html_text: str) -> str:
     return ipa
 
 
-def _extract_cambridge_uk_audio_url(html_text: str) -> str:
+def _extract_cambridge_headword_scope(html_text: str, word: str) -> str:
+    word_clean = re.escape(word.strip())
+    slug_clean = re.escape(_cambridge_dictionary_url_slug(word))
+    for pattern in (
+        rf'<span[^>]*class=["\'][^"\']*\bhw\b[^"\']*["\'][^>]*>\s*{word_clean}\s*</span>',
+        rf'<span[^>]*class=["\'][^"\']*\bhw\b[^"\']*["\'][^>]*>\s*{slug_clean}\s*</span>',
+    ):
+        match = re.search(pattern, html_text, flags=re.IGNORECASE)
+        if match:
+            start = max(0, match.start() - 200)
+            end = min(len(html_text), match.end() + 4000)
+            return html_text[start:end]
+    return ""
+
+
+def _extract_cambridge_uk_audio_url_from_scope(html_text: str) -> str:
     uk_open = re.search(
         r'<span[^>]*class=["\'][^"\']*\buk\b[^"\']*\bdpron-i\b[^"\']*["\'][^>]*>',
         html_text,
@@ -749,12 +764,7 @@ def _extract_cambridge_uk_audio_url(html_text: str) -> str:
     if not uk_open:
         return ""
 
-    us_open = re.search(
-        r'<span[^>]*class=["\'][^"\']*\bus\b[^"\']*\bdpron-i\b[^"\']*["\'][^>]*>',
-        html_text[uk_open.end() :],
-        flags=re.IGNORECASE,
-    )
-    uk_end = uk_open.end() + us_open.start() if us_open else min(len(html_text), uk_open.start() + 3000)
+    uk_end = min(len(html_text), uk_open.start() + 2500)
     uk_chunk = html_text[uk_open.start() : uk_end]
 
     mp3_match = re.search(
@@ -762,6 +772,12 @@ def _extract_cambridge_uk_audio_url(html_text: str) -> str:
         uk_chunk,
         flags=re.IGNORECASE,
     )
+    if not mp3_match:
+        mp3_match = re.search(
+            r'<source[^>]*src=["\']([^"\']+\.mp3)["\'][^>]*type=["\']audio/mpeg["\']',
+            uk_chunk,
+            flags=re.IGNORECASE,
+        )
     if not mp3_match:
         mp3_match = re.search(
             r'<source[^>]*src=["\']([^"\']+\.mp3)["\']',
@@ -779,6 +795,31 @@ def _extract_cambridge_uk_audio_url(html_text: str) -> str:
     elif src.startswith("/"):
         src = "https://dictionary.cambridge.org" + src
     return src if src.startswith(("http://", "https://")) else ""
+
+
+def _extract_cambridge_uk_audio_url(html_text: str, word: str = "") -> str:
+    scopes: List[str] = []
+    if word:
+        headword_scope = _extract_cambridge_headword_scope(html_text, word)
+        if headword_scope:
+            scopes.append(headword_scope)
+    scopes.append(html_text)
+    for scope in scopes:
+        audio_url = _extract_cambridge_uk_audio_url_from_scope(scope)
+        if audio_url:
+            return audio_url
+    return ""
+
+
+def _supplement_cambridge_pronunciation(word: str, details: Dict[str, str]) -> Dict[str, str]:
+    cambridge_html = _request_cambridge_html(word)
+    if not cambridge_html:
+        return details
+    if not details.get("ipa"):
+        details["ipa"] = _extract_cambridge_ipa(cambridge_html)
+    if not details.get("audio"):
+        details["audio"] = _extract_cambridge_uk_audio_url(cambridge_html, word)
+    return details
 
 
 _DCAMBRIDGE_PHRASE_BODY_OPEN = re.compile(
@@ -1078,7 +1119,7 @@ def _extract_from_cambridge(
     selected_part_of_speech: Optional[str] = None,
 ) -> Dict[str, str]:
     ipa = _extract_cambridge_ipa(html_text)
-    audio_url = _extract_cambridge_uk_audio_url(html_text)
+    audio_url = _extract_cambridge_uk_audio_url(html_text, word)
     senses = _extract_cambridge_senses(html_text)
 
     def unique(items: List[str]) -> List[str]:
@@ -1309,7 +1350,7 @@ def _download_cambridge_audio_to_media(audio_url: str, word: str) -> Optional[st
         return None
     if not data:
         return None
-    if content_type and ("audio/" not in content_type) and ("mpeg" not in content_type):
+    if content_type and ("audio/" not in content_type) and ("mpeg" not in content_type) and ("octet-stream" not in content_type):
         return None
 
     parsed = urllib.parse.urlparse(audio_url)
@@ -1828,6 +1869,9 @@ def _enrich_note(
             details["synonyms"] = cfg["separator"].join(dm["synonyms"])
         if dm.get("antonyms") and not details.get("antonyms"):
             details["antonyms"] = cfg["separator"].join(dm["antonyms"])
+        details = _supplement_cambridge_pronunciation(word, details)
+        if details.get("audio"):
+            details["audio"] = _localize_cambridge_audio(details.get("audio", ""), word)
         if not any(details.values()):
             return "no_api_result"
     changed = False
@@ -1838,7 +1882,7 @@ def _enrich_note(
             continue
         field_overwrite = bool(cfg["overwrite_existing"]) or (
             source == "cambridge" and key in ("image", "audio")
-        )
+        ) or (key == "audio" and bool(value))
         if key == "examples":
             resolved_examples_field = _resolve_note_field_name(note, target_field)
             if not resolved_examples_field:
@@ -1852,7 +1896,10 @@ def _enrich_note(
                     note[resolved_examples_field] = merged_html
                     changed = True
                 continue
-        if _set_field(note, target_field, value, field_overwrite):
+        resolved_field = _resolve_note_field_name(note, target_field)
+        if not resolved_field:
+            continue
+        if _set_field(note, resolved_field, value, field_overwrite):
             changed = True
 
     if source == "cambridge" and bool(cfg.get("cambridge_usage_tags_enabled", True)):
