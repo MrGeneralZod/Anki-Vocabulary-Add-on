@@ -1287,22 +1287,13 @@ def _image_generation_auth_header(token: str) -> str:
 
 
 def _build_vocab_image_prompt(word: str, definition: str) -> str:
+    cleaned_word = _clean(word)
+    cleaned_definition = _clean(definition)
     return (
-        "Create a simple flat design vector illustration for English vocabulary learning.\n\n"
-        f"WORD: {_clean(word)}\n"
-        f"MEANING: {_clean(definition)}\n\n"
-        "Requirements:\n"
-        "- Style: minimalist flat design, simple vector illustration\n"
-        "- Composition: one central object or simple scene that clearly represents the meaning\n"
-        "- Colors: bright but limited palette (4-5 colors maximum)\n"
-        "- NO text, NO labels, NO translations, NO arrows or explanatory elements\n"
-        "- Image should be self-explanatory and unambiguous\n"
-        "- Target audience: adult English learners (A2-B2 level)\n"
-        "- Focus on the specific meaning provided, avoid abstract interpretations\n\n"
-        "Technical specs:\n"
-        "- Square format\n"
-        "- Clean, educational style\n"
-        "- Minimal details, maximum clarity"
+        f'A clean, modern flat vector illustration representing the concept of "{cleaned_word}" '
+        f"({cleaned_definition}). The style is minimalist with smooth lines, solid colors, and soft shading. "
+        "Simple composition, clear narrative, no text, no letters, no words. High quality, educational flashcard "
+        "style, vibrant yet harmonious color palette."
     )
 
 
@@ -1311,23 +1302,28 @@ def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Opt
     LAST_IMAGE_GEN_ERROR = ""
     url = _clean(api_url) or DEFAULT_IMAGE_GENERATION_API_URL
     auth = _image_generation_auth_header(token)
-    if not auth:
-        LAST_IMAGE_GEN_ERROR = "Image generation API token is not configured."
-        return None, ""
-    body = json.dumps({"prompt": prompt}).encode("utf-8")
+    body = json.dumps(
+        {
+            "prompt": prompt,
+            "aspect_ratio": "1:1",
+            "resolution": "1K",
+        }
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "image/*,application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
+    }
+    if auth:
+        headers["Authorization"] = auth
     req = urllib.request.Request(
         url,
         data=body,
-        headers={
-            "Authorization": auth,
-            "Content-Type": "application/json",
-            "Accept": "image/*,application/json",
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/123.0.0.0 Safari/537.36"
-            ),
-        },
+        headers=headers,
         method="POST",
     )
     try:
