@@ -6,7 +6,9 @@
     "examples": "Examples",
     "synonyms": "Synonyms",
     "antonyms": "Antonyms",
-    "image": "Image"
+    "image": "Image",
+    "part_of_speech": "Part of speech",
+    "cefr": "CEFR"
   },
   "separator": "; ",
   "overwrite_existing": false,
@@ -17,8 +19,10 @@
     "wordnik": "",
     "merriam_webster": "",
     "merriam_collegiate": "",
-    "merriam_sd3": ""
+    "merriam_sd3": "",
+    "image_generation": ""
   },
+  "image_generation_api_url": "https://free-image-generation-api.lokiyan1996.workers.dev/",
   "cambridge_usage_tags_enabled": true,
   "cambridge_usage_tag_map": {}
 }

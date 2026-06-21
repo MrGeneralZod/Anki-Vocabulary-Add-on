@@ -21,6 +21,9 @@ from aqt.utils import askUser, showInfo, tooltip
 
 MENU_LABEL = "Enrich Vocabulary Fields"
 LAST_API_ERROR = ""
+LAST_IMAGE_GEN_ERROR = ""
+DEFAULT_IMAGE_GENERATION_API_URL = "https://free-image-generation-api.lokiyan1996.workers.dev/"
+ENRICHED_CARD_FLAG = 7  # Purple flag (Ctrl+7 in Browser)
 DEFAULT_CONFIG = {
     "source_field": "Word",
     "field_map": {
@@ -30,6 +33,8 @@ DEFAULT_CONFIG = {
         "synonyms": "Synonyms",
         "antonyms": "Antonyms",
         "image": "Image",
+        "part_of_speech": "Part of speech",
+        "cefr": "CEFR",
     },
     "separator": "; ",
     "overwrite_existing": False,
@@ -41,9 +46,11 @@ DEFAULT_CONFIG = {
         "merriam_webster": "",
         "merriam_collegiate": "",
         "merriam_sd3": "",
+        "image_generation": "",
     },
     "cambridge_usage_tags_enabled": True,
     "cambridge_usage_tag_map": {},
+    "image_generation_api_url": DEFAULT_IMAGE_GENERATION_API_URL,
 }
 
 
@@ -70,10 +77,112 @@ def _clean(value: str) -> str:
     return " ".join(value.split()).strip()
 
 
+def _normalize_definition(value: str) -> str:
+    text = _clean(value)
+    return text[:-1].rstrip() if text.endswith(":") else text
+
+
 def _plain_text(value: str) -> str:
     unescaped = html.unescape(value or "")
     no_tags = re.sub(r"<[^>]+>", " ", unescaped)
     return _clean(no_tags)
+
+
+def _parse_examples_list(field_value: str) -> List[str]:
+    raw = field_value or ""
+    if not _plain_text(raw):
+        return []
+    items: List[str] = []
+    for match in re.finditer(r"<li[^>]*>(.*?)</li>", raw, flags=re.IGNORECASE | re.DOTALL):
+        text = _plain_text(match.group(1))
+        if text:
+            items.append(text)
+    if items:
+        return items
+    text = _plain_text(raw)
+    return [text] if text else []
+
+
+def _merge_example_lists(existing: List[str], fetched: List[str], max_examples: int) -> List[str]:
+    merged: List[str] = []
+    seen = set()
+    for item in existing + fetched:
+        cleaned = _clean(item)
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(cleaned)
+        if len(merged) >= max_examples:
+            break
+    return merged
+
+
+def _render_examples_html(examples: List[str], word: str) -> str:
+    if not examples:
+        return ""
+
+    def extract_example_prefix(text: str) -> Tuple[str, str]:
+        source = _clean(text)
+        if not source:
+            return "", ""
+
+        prefixes: List[str] = []
+        idx = 0
+        length = len(source)
+        while idx < length:
+            while idx < length and source[idx].isspace():
+                idx += 1
+            if idx >= length:
+                break
+
+            opener = source[idx]
+            closer = ")" if opener == "(" else "]" if opener == "[" else ""
+            if not closer:
+                break
+            end = source.find(closer, idx + 1)
+            if end < 0:
+                break
+
+            chunk = source[idx : end + 1].strip()
+            # Short leading bracketed chunks in Cambridge examples usually encode grammar patterns.
+            if not chunk or len(chunk) > 140:
+                break
+            prefixes.append(chunk)
+            idx = end + 1
+
+        if prefixes:
+            return " ".join(prefixes), source[idx:].strip()
+
+        # Cambridge often prefixes examples with grammar patterns without brackets,
+        # e.g. "assure sb of sth The unions assured...".
+        bare_prefix = re.match(
+            r"^([a-z][a-z0-9'/-]*(?:\s+[a-z][a-z0-9'/-]*){1,7})\s+([\"“]?[A-Z].*)$",
+            source,
+        )
+        if bare_prefix:
+            prefix = _clean(bare_prefix.group(1))
+            remainder = _clean(bare_prefix.group(2))
+            if len(prefix) <= 80:
+                return prefix, remainder
+
+        return "", source
+
+    rendered: List[str] = []
+    for example in examples:
+        prefix, remainder = extract_example_prefix(example)
+        if prefix:
+            safe_prefix = html.escape(prefix)
+            safe_remainder = html.escape(remainder)
+            safe_example = f"<i>{safe_prefix}</i>"
+            if safe_remainder:
+                safe_example += f" {safe_remainder}"
+        else:
+            safe_example = html.escape(example)
+        rendered.append(f"<li>{safe_example}</li>")
+    return "<ul>" + "".join(rendered) + "</ul>"
 
 
 def _resolve_note_field_name(note: Note, configured_name: str) -> Optional[str]:
@@ -337,6 +446,27 @@ def _request_datamuse_data(word: str) -> Dict[str, List[str]]:
     return out
 
 
+def _definition_choice_label(choice: Dict[str, str]) -> str:
+    definition = _normalize_definition(choice.get("definition", ""))
+    pos = _clean(choice.get("part_of_speech", ""))
+    cefr = _clean(choice.get("cefr", ""))
+    prefix_parts = [p for p in (cefr, pos) if p]
+    if prefix_parts and definition:
+        return f"{' · '.join(prefix_parts)}: {definition}"
+    return definition
+
+
+def _extract_cambridge_cefr(block_html: str) -> str:
+    match = re.search(
+        r'<span[^>]*class=["\'][^"\']*\bepp-xref\b[^"\']*\bdxref\b[^"\']*\b(A1|A2|B1|B2|C1|C2)\b[^"\']*["\'][^>]*>',
+        block_html,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return match.group(1).upper()
+
+
 def _extract_details(
     payload: List[Dict[str, Any]],
     word: str,
@@ -344,6 +474,7 @@ def _extract_details(
     max_definitions: int,
     max_examples: int,
     selected_definition: Optional[str] = None,
+    selected_part_of_speech: Optional[str] = None,
 ) -> Dict[str, str]:
     ipa = ""
     definitions: List[str] = []
@@ -365,7 +496,7 @@ def _extract_details(
             synonyms.extend(_clean(item) for item in meaning.get("synonyms", []) if _clean(item))
             antonyms.extend(_clean(item) for item in meaning.get("antonyms", []) if _clean(item))
             for d in meaning.get("definitions", []):
-                definition = _clean(d.get("definition", ""))
+                definition = _normalize_definition(d.get("definition", ""))
                 if definition:
                     definitions.append(definition)
                 example = _clean(d.get("example", ""))
@@ -388,20 +519,26 @@ def _extract_details(
         uniq_defs = [selected_definition]
     else:
         uniq_defs = uniq_defs_all[:1]
+
+    part_of_speech = _clean(selected_part_of_speech or "")
+    lookup_definition = selected_definition or (uniq_defs[0] if uniq_defs else "")
+    if lookup_definition and not part_of_speech:
+        for entry in payload:
+            for meaning in entry.get("meanings", []):
+                pos = _clean(meaning.get("partOfSpeech", ""))
+                for d in meaning.get("definitions", []):
+                    if _normalize_definition(d.get("definition", "")) == lookup_definition:
+                        part_of_speech = pos
+                        break
+                if part_of_speech:
+                    break
+            if part_of_speech:
+                break
+
     uniq_examples = unique(examples)[:max_examples]
     uniq_syn = unique(synonyms)
     uniq_ant = unique(antonyms)
-    examples_html = ""
-    if uniq_examples:
-        escaped_word = re.escape(word)
-        pattern = re.compile(escaped_word, flags=re.IGNORECASE) if escaped_word else None
-        rendered: List[str] = []
-        for example in uniq_examples:
-            safe_example = html.escape(example)
-            if pattern:
-                safe_example = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_example)
-            rendered.append(f"<li>{safe_example}</li>")
-        examples_html = "<ul>" + "".join(rendered) + "</ul>"
+    examples_html = _render_examples_html(uniq_examples, word)
 
     return {
         "ipa": ipa,
@@ -409,6 +546,7 @@ def _extract_details(
         "examples": examples_html,
         "synonyms": separator.join(uniq_syn),
         "antonyms": separator.join(uniq_ant),
+        "part_of_speech": part_of_speech,
     }
 
 
@@ -473,8 +611,13 @@ def _extract_from_merriam(payload: List[Dict[str, Any]], separator: str) -> Dict
         if not definition:
             shortdef = entry.get("shortdef", [])
             if isinstance(shortdef, list) and shortdef:
-                definition = _clean(str(shortdef[0]))
+                definition = _normalize_definition(str(shortdef[0]))
         if definition:
+            break
+    part_of_speech = ""
+    for entry in payload:
+        part_of_speech = _clean(entry.get("fl", ""))
+        if part_of_speech:
             break
     return {
         "ipa": ipa,
@@ -482,21 +625,112 @@ def _extract_from_merriam(payload: List[Dict[str, Any]], separator: str) -> Dict
         "examples": "",
         "synonyms": "",
         "antonyms": "",
+        "part_of_speech": part_of_speech,
     }
+
+
+def _extract_cambridge_part_of_speech(block_html: str) -> str:
+    patterns = (
+        r'<span[^>]*class=["\'][^"\']*\bposgram\b[^"\']*["\'][^>]*>(.*?)</span>',
+        r'<span[^>]*class=["\'][^"\']*\bpos\b[^"\']*\bdpos\b[^"\']*["\'][^>]*>(.*?)</span>',
+    )
+
+    # Cambridge markup can repeat POS blocks; when we have multiple matches in
+    # the provided context, prefer the closest one (last in the text).
+    candidates: List[Tuple[int, str]] = []
+    for pattern in patterns:
+        for m in re.finditer(pattern, block_html, flags=re.IGNORECASE | re.DOTALL):
+            raw = m.group(1)
+            text = _clean(html.unescape(re.sub(r"<[^>]+>", " ", raw)))
+            if text:
+                candidates.append((m.start(), text))
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda x: x[0])[1]
+
+
+def _build_cambridge_pos_timeline(html_text: str) -> List[Tuple[int, str]]:
+    markers: List[Tuple[int, str]] = []
+    patterns = (
+        r'<span[^>]*class=["\'][^"\']*\bposgram\b[^"\']*["\'][^>]*>(.*?)</span>',
+        r'<span[^>]*class=["\'][^"\']*\bpos\b[^"\']*\bdpos\b[^"\']*["\'][^>]*>(.*?)</span>',
+    )
+    for pattern in patterns:
+        for m in re.finditer(pattern, html_text, flags=re.IGNORECASE | re.DOTALL):
+            text = _clean(html.unescape(re.sub(r"<[^>]+>", " ", m.group(1))))
+            if text:
+                markers.append((m.start(), text))
+    markers.sort(key=lambda item: item[0])
+    return markers
+
+
+def _cambridge_part_of_speech_at(
+    position: int,
+    pos_timeline: List[Tuple[int, str]],
+    local_context: str,
+) -> str:
+    pos = _extract_cambridge_part_of_speech(local_context)
+    if pos:
+        return pos
+    inherited = ""
+    for idx, label in pos_timeline:
+        if idx <= position:
+            inherited = label
+        else:
+            break
+    return inherited
+
+
+def _nested_span_plain_text(html_text: str, open_end: int) -> str:
+    depth = 1
+    pos = open_end
+    parts: List[str] = []
+    while pos < len(html_text) and depth > 0:
+        tag_start = html_text.find("<", pos)
+        if tag_start < 0:
+            parts.append(html_text[pos:])
+            break
+        parts.append(html_text[pos:tag_start])
+        if html_text[tag_start : tag_start + 2].lower() == "</":
+            depth -= 1
+            if depth == 0:
+                break
+            close_gt = html_text.find(">", tag_start)
+            pos = close_gt + 1 if close_gt >= 0 else len(html_text)
+            continue
+        close_gt = html_text.find(">", tag_start)
+        if close_gt < 0:
+            break
+        tag_chunk = html_text[tag_start : close_gt + 1]
+        if re.match(r"<\s*\w+", tag_chunk) and not tag_chunk.lower().startswith(("<!", "<?")):
+            depth += 1
+        pos = close_gt + 1
+    return _clean(html.unescape("".join(parts)))
 
 
 def _extract_cambridge_ipa(html_text: str) -> str:
     ipa = ""
-    # Prefer UK IPA, then fallback to first IPA on page.
-    uk_match = re.search(
-        r'<span class="[^"]*\buk dpron-i\b[^"]*">.*?<span class="[^"]*\bipa\b[^"]*">\s*([^<]+?)\s*</span>',
+    us_match = re.search(
+        r'<span[^>]*class=["\'][^"\']*\bus\b[^"\']*\bdpron-i\b[^"\']*["\'][^>]*>',
         html_text,
-        flags=re.IGNORECASE | re.DOTALL,
+        flags=re.IGNORECASE,
     )
-    first_match = re.search(r'<span class="[^"]*\bipa\b[^"]*">\s*([^<]+?)\s*</span>', html_text, flags=re.IGNORECASE)
-    match = uk_match or first_match
-    if match:
-        ipa = _clean(html.unescape(match.group(1)))
+    uk_scope = html_text[: us_match.start()] if us_match else html_text
+    uk_ipa_open = re.search(
+        r'<span[^>]*class=["\'][^"\']*\bipa\b[^"\']*["\'][^>]*>',
+        uk_scope,
+        flags=re.IGNORECASE,
+    )
+    if uk_ipa_open:
+        ipa = _nested_span_plain_text(uk_scope, uk_ipa_open.end())
+    if not ipa:
+        first_ipa_open = re.search(
+            r'<span[^>]*class=["\'][^"\']*\bipa\b[^"\']*["\'][^>]*>',
+            html_text,
+            flags=re.IGNORECASE,
+        )
+        if first_ipa_open:
+            ipa = _nested_span_plain_text(html_text, first_ipa_open.end())
     if ipa and not ipa.startswith("/"):
         ipa = "/" + ipa
     if ipa and not ipa.endswith("/"):
@@ -646,7 +880,7 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
                     text = _clean(html.unescape("".join(self._capture_parts)))
                     if text:
                         if self._capture_kind == "definition":
-                            self.definition = text
+                            self.definition = _normalize_definition(text)
                         elif self._capture_kind == "example":
                             self.examples.append(text)
                         elif self._capture_kind == "synonym":
@@ -678,24 +912,39 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
     html_text = _strip_cambridge_nested_phrase_blocks(html_text)
 
     senses: List[Dict[str, Any]] = []
-    parts = re.split(
+    def_start_re = re.compile(
         r'(?=<div[^>]*class=["\'][^"\']*\bdef-block\b[^"\']*["\'][^>]*>)',
-        html_text,
         flags=re.IGNORECASE,
     )
-    seen_definitions = set()
-    for part in parts:
-        if "def-block" not in part:
-            continue
+    starts = [m.start() for m in def_start_re.finditer(html_text)]
+    pos_timeline = _build_cambridge_pos_timeline(html_text)
+
+    seen_pairs = set()
+    # POS is usually adjacent to def-block, but sometimes slightly outside of it.
+    # Use a window around each def-block start and choose the closest POS match.
+    pos_lookback = 2500
+    pos_lookahead = 800
+
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(html_text)
+        part = html_text[start:end]
+
         parser = _CambridgeBlockParser()
         parser.feed(part)
-        definition = _clean(parser.definition)
-        if not definition or definition in seen_definitions:
+        definition = _normalize_definition(parser.definition)
+
+        context = html_text[max(0, start - pos_lookback) : min(len(html_text), start + pos_lookahead)]
+        pos = _cambridge_part_of_speech_at(start, pos_timeline, context)
+        cefr = _extract_cambridge_cefr(part)
+
+        if not definition or (definition, pos) in seen_pairs:
             continue
-        seen_definitions.add(definition)
+        seen_pairs.add((definition, pos))
         senses.append(
             {
                 "definition": definition,
+                "part_of_speech": pos,
+                "cefr": cefr,
                 "examples": [e for e in parser.examples if _clean(e)],
                 "synonyms": [s for s in parser.synonyms if _clean(s)],
                 "antonyms": [a for a in parser.antonyms if _clean(a)],
@@ -714,7 +963,9 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
     if parser.definition:
         fallback.append(
             {
-                "definition": parser.definition,
+                "definition": _normalize_definition(parser.definition),
+                "part_of_speech": _extract_cambridge_part_of_speech(html_text),
+                "cefr": _extract_cambridge_cefr(html_text),
                 "examples": parser.examples,
                 "synonyms": parser.synonyms,
                 "antonyms": parser.antonyms,
@@ -733,11 +984,13 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
         flags=re.IGNORECASE | re.DOTALL,
     ):
         raw = re.sub(r"<[^>]+>", " ", m.group(1))
-        definition = _clean(html.unescape(raw))
+        definition = _normalize_definition(html.unescape(raw))
         if definition and definition not in seen:
             fallback.append(
                 {
                     "definition": definition,
+                    "part_of_speech": "",
+                    "cefr": "",
                     "examples": [],
                     "synonyms": [],
                     "antonyms": [],
@@ -779,6 +1032,7 @@ def _extract_from_cambridge(
     max_definitions: int,
     max_examples: int,
     selected_definition: Optional[str] = None,
+    selected_part_of_speech: Optional[str] = None,
 ) -> Dict[str, str]:
     ipa = _extract_cambridge_ipa(html_text)
     senses = _extract_cambridge_senses(html_text)
@@ -795,15 +1049,25 @@ def _extract_from_cambridge(
     chosen_definitions: List[str] = []
     chosen_examples: List[str] = []
     chosen_labels: List[str] = []
+    chosen_synonyms: List[str] = []
+    chosen_antonyms: List[str] = []
     chosen_image_url = ""
+    chosen_part_of_speech = ""
+    chosen_cefr = ""
     global_labels = _extract_cambridge_global_usage_labels(html_text)
     if selected_definition:
         for sense in senses:
-            if sense.get("definition") == selected_definition:
+            if sense.get("definition") == selected_definition and (
+                not selected_part_of_speech or sense.get("part_of_speech", "") == selected_part_of_speech
+            ):
                 chosen_definitions = [selected_definition]
                 chosen_examples = list(sense.get("examples", []))
                 chosen_labels = list(sense.get("labels", []))
+                chosen_synonyms = list(sense.get("synonyms", []))
+                chosen_antonyms = list(sense.get("antonyms", []))
                 chosen_image_url = _clean(str(sense.get("image_url", "")))
+                chosen_part_of_speech = _clean(str(sense.get("part_of_speech", "")))
+                chosen_cefr = _clean(str(sense.get("cefr", "")))
                 break
     if not chosen_definitions:
         chosen_definitions = [s.get("definition", "") for s in senses if s.get("definition")]
@@ -811,27 +1075,17 @@ def _extract_from_cambridge(
         if senses:
             chosen_examples = list(senses[0].get("examples", []))
             chosen_labels = list(senses[0].get("labels", []))
+            chosen_synonyms = list(senses[0].get("synonyms", []))
+            chosen_antonyms = list(senses[0].get("antonyms", []))
             chosen_image_url = _clean(str(senses[0].get("image_url", "")))
+            chosen_part_of_speech = _clean(str(senses[0].get("part_of_speech", "")))
+            chosen_cefr = _clean(str(senses[0].get("cefr", "")))
 
     uniq_examples = unique(chosen_examples)[:max_examples]
-    thes_html = _request_cambridge_thesaurus_html(word)
-    if thes_html:
-        uniq_synonyms, uniq_antonyms = _extract_cambridge_thesaurus_synonyms_antonyms(thes_html)
-    else:
-        uniq_synonyms, uniq_antonyms = [], []
+    uniq_synonyms = unique([_clean(x) for x in chosen_synonyms if _clean(x)])
+    uniq_antonyms = unique([_clean(x) for x in chosen_antonyms if _clean(x)])
     uniq_labels = unique(chosen_labels + global_labels)
-
-    examples_html = ""
-    if uniq_examples:
-        escaped_word = re.escape(word)
-        pattern = re.compile(escaped_word, flags=re.IGNORECASE) if escaped_word else None
-        rendered: List[str] = []
-        for example in uniq_examples:
-            safe_example = html.escape(example)
-            if pattern:
-                safe_example = pattern.sub(lambda m: f"<u>{html.escape(m.group(0))}</u>", safe_example)
-            rendered.append(f"<li>{safe_example}</li>")
-        examples_html = "<ul>" + "".join(rendered) + "</ul>"
+    examples_html = _render_examples_html(uniq_examples, word)
 
     return {
         "ipa": ipa,
@@ -841,7 +1095,35 @@ def _extract_from_cambridge(
         "antonyms": separator.join(uniq_antonyms),
         "image": (f'<img src="{html.escape(chosen_image_url, quote=True)}">' if chosen_image_url else ""),
         "usage_labels": separator.join(uniq_labels),
+        "part_of_speech": chosen_part_of_speech,
+        "cefr": chosen_cefr.upper() if chosen_cefr else "",
     }
+
+
+def _flag_note_cards_purple(note: Note) -> None:
+    if mw.col is None:
+        return
+    try:
+        card_ids = note.card_ids()
+    except Exception:
+        try:
+            card_ids = mw.col.card_ids(note.id)
+        except Exception:
+            return
+    if not card_ids:
+        return
+    try:
+        mw.col.set_user_flag_for_cards(ENRICHED_CARD_FLAG, card_ids)
+        return
+    except Exception:
+        pass
+    for cid in card_ids:
+        try:
+            card = mw.col.get_card(cid)
+            card.set_user_flag(ENRICHED_CARD_FLAG)
+            mw.col.update_card(card)
+        except Exception:
+            continue
 
 
 def _apply_tags(note: Note, tags: List[str]) -> bool:
@@ -941,6 +1223,137 @@ def _localize_cambridge_image_html(image_html: str, word: str) -> str:
     return f'<img src="{html.escape(local_filename, quote=True)}">'
 
 
+def _image_generation_ext_for_bytes(data: bytes, content_type: str) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
+        return ".webp"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    ct = content_type.lower()
+    if "png" in ct:
+        return ".png"
+    if "webp" in ct:
+        return ".webp"
+    if "gif" in ct:
+        return ".gif"
+    if "jpeg" in ct or "jpg" in ct:
+        return ".jpg"
+    return ".png"
+
+
+def _save_image_bytes_to_media(data: bytes, word: str, prefix: str, content_type: str = "") -> Optional[str]:
+    if mw.col is None or not data:
+        return None
+    ext = _image_generation_ext_for_bytes(data, content_type)
+    safe_word = re.sub(r"[^a-zA-Z0-9_-]+", "_", word).strip("_") or "word"
+    digest = hashlib.md5(data).hexdigest()[:10]
+    filename = f"{prefix}_{safe_word}_{digest}{ext}"
+
+    media = mw.col.media
+    try:
+        if hasattr(media, "write_data"):
+            media.write_data(filename, data)
+            return filename
+    except Exception:
+        pass
+
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(data)
+            temp_path = tmp.name
+        added = media.add_file(temp_path)
+        return os.path.basename(added) if added else None
+    except Exception:
+        return None
+    finally:
+        try:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+        except Exception:
+            pass
+
+
+def _image_generation_auth_header(token: str) -> str:
+    cleaned = _clean(token)
+    if not cleaned:
+        return ""
+    if cleaned.lower().startswith("bearer "):
+        return cleaned
+    return f"Bearer {cleaned}"
+
+
+def _build_vocab_image_prompt(word: str, definition: str) -> str:
+    return (
+        "Create a simple flat design vector illustration for English vocabulary learning.\n\n"
+        f"WORD: {_clean(word)}\n"
+        f"MEANING: {_clean(definition)}\n\n"
+        "Requirements:\n"
+        "- Style: minimalist flat design, simple vector illustration\n"
+        "- Composition: one central object or simple scene that clearly represents the meaning\n"
+        "- Colors: bright but limited palette (4-5 colors maximum)\n"
+        "- NO text, NO labels, NO translations, NO arrows or explanatory elements\n"
+        "- Image should be self-explanatory and unambiguous\n"
+        "- Target audience: adult English learners (A2-B2 level)\n"
+        "- Focus on the specific meaning provided, avoid abstract interpretations\n\n"
+        "Technical specs:\n"
+        "- Square format\n"
+        "- Clean, educational style\n"
+        "- Minimal details, maximum clarity"
+    )
+
+
+def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Optional[bytes], str]:
+    global LAST_IMAGE_GEN_ERROR
+    LAST_IMAGE_GEN_ERROR = ""
+    url = _clean(api_url) or DEFAULT_IMAGE_GENERATION_API_URL
+    auth = _image_generation_auth_header(token)
+    if not auth:
+        LAST_IMAGE_GEN_ERROR = "Image generation API token is not configured."
+        return None, ""
+    body = json.dumps({"prompt": prompt}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": auth,
+            "Content-Type": "application/json",
+            "Accept": "image/*,application/json",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
+            ),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as response:
+            data = response.read()
+            content_type = str(response.headers.get("Content-Type", "")).lower()
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        LAST_IMAGE_GEN_ERROR = f"HTTP {exc.code}: {detail or exc.reason}"
+        return None, ""
+    except Exception as exc:
+        LAST_IMAGE_GEN_ERROR = str(exc)
+        return None, ""
+    if not data:
+        LAST_IMAGE_GEN_ERROR = "Empty image response from API."
+        return None, ""
+    if "json" in content_type or (data[:1] == b"{" and b"error" in data[:200].lower()):
+        LAST_IMAGE_GEN_ERROR = data.decode("utf-8", errors="replace")[:300]
+        return None, ""
+    return data, content_type
+
+
 def _find_existing_emoji_variant(base_label_tag: str) -> Optional[str]:
     if mw.col is None:
         return None
@@ -974,32 +1387,32 @@ def _merge_non_empty(base: Dict[str, str], extra: Dict[str, str]) -> Dict[str, s
     return merged
 
 
-def _extract_definition_candidates(payload: List[Dict[str, Any]]) -> List[str]:
-    definitions: List[str] = []
+def _extract_definition_candidates(payload: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    choices: List[Dict[str, str]] = []
+    seen: set = set()
     for entry in payload:
         for meaning in entry.get("meanings", []):
+            pos = _clean(meaning.get("partOfSpeech", ""))
             for d in meaning.get("definitions", []):
-                definition = _clean(d.get("definition", ""))
-                if definition:
-                    definitions.append(definition)
-
-    unique_defs: List[str] = []
-    seen = set()
-    for definition in definitions:
-        if definition not in seen:
-            unique_defs.append(definition)
-            seen.add(definition)
-    return unique_defs
+                definition = _normalize_definition(d.get("definition", ""))
+                if not definition:
+                    continue
+                key = (definition, pos)
+                if key in seen:
+                    continue
+                seen.add(key)
+                choices.append({"definition": definition, "part_of_speech": pos})
+    return choices
 
 
 def _choose_definition_dialog(
-    definitions: List[str],
+    choices: List[Dict[str, str]],
     parent: Optional[QWidget] = None,
-) -> Optional[str]:
-    if not definitions:
+) -> Optional[Dict[str, str]]:
+    if not choices:
         return None
-    if len(definitions) == 1:
-        return definitions[0]
+    if len(choices) == 1:
+        return choices[0]
 
     dialog = QDialog(parent or mw)
     dialog.setWindowTitle("Choose definition")
@@ -1007,7 +1420,8 @@ def _choose_definition_dialog(
     layout = QVBoxLayout(dialog)
 
     combo = QComboBox(dialog)
-    combo.addItems(definitions)
+    for choice in choices:
+        combo.addItem(_definition_choice_label(choice))
     layout.addWidget(combo)
 
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog)
@@ -1017,7 +1431,10 @@ def _choose_definition_dialog(
 
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None
-    return combo.currentText() or None
+    idx = combo.currentIndex()
+    if idx < 0 or idx >= len(choices):
+        return None
+    return choices[idx]
 
 
 def _set_field(note: Any, field_name: str, value: str, overwrite_existing: bool) -> bool:
@@ -1059,6 +1476,8 @@ def _show_field_mapping_dialog(
         "synonyms": "Synonyms field:",
         "antonyms": "Antonyms field:",
         "image": "Image field:",
+        "part_of_speech": "Part of speech field:",
+        "cefr": "CEFR field:",
     }
     target_combos: Dict[str, QComboBox] = {}
     for key, label in map_labels.items():
@@ -1100,6 +1519,15 @@ def _show_field_mapping_dialog(
     merriam_legacy_key.setText(cfg.get("api_keys", {}).get("merriam_webster", ""))
     form.addRow("Merriam legacy key (optional):", merriam_legacy_key)
 
+    image_api_url = QLineEdit(dialog)
+    image_api_url.setText(cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL))
+    form.addRow("Image API URL:", image_api_url)
+
+    image_api_token = QLineEdit(dialog)
+    image_api_token.setEchoMode(QLineEdit.EchoMode.Password)
+    image_api_token.setText(cfg.get("api_keys", {}).get("image_generation", ""))
+    form.addRow("Image API token:", image_api_token)
+
     def update_api_visibility() -> None:
         selected = data_source_combo.currentText()
         wordnik_key.setVisible(selected in ("wordnik", "custom"))
@@ -1133,11 +1561,13 @@ def _show_field_mapping_dialog(
         "field_map": field_map,
         "overwrite_existing": overwrite_checkbox.isChecked(),
         "data_source": data_source_combo.currentText(),
+        "image_generation_api_url": _clean(image_api_url.text()) or DEFAULT_IMAGE_GENERATION_API_URL,
         "api_keys": {
             "wordnik": _clean(wordnik_key.text()),
             "merriam_webster": _clean(merriam_legacy_key.text()),
             "merriam_collegiate": _clean(merriam_collegiate_key.text()),
             "merriam_sd3": _clean(merriam_sd3_key.text()),
+            "image_generation": _clean(image_api_token.text()),
         },
     }
 
@@ -1149,12 +1579,15 @@ def _persist_field_choices(
     overwrite_existing: bool,
     data_source: str,
     api_keys: Dict[str, str],
+    image_generation_api_url: Optional[str] = None,
 ) -> None:
     cfg["source_field"] = source_field
     cfg["field_map"] = field_map
     cfg["overwrite_existing"] = overwrite_existing
     cfg["data_source"] = data_source
     cfg["api_keys"] = api_keys
+    if image_generation_api_url:
+        cfg["image_generation_api_url"] = image_generation_api_url
     mw.addonManager.writeConfig(__name__, cfg)
 
 
@@ -1164,6 +1597,7 @@ def _enrich_note(
     cfg: Dict[str, Any],
     payload: Optional[Any] = None,
     selected_definition: Optional[str] = None,
+    selected_part_of_speech: Optional[str] = None,
 ) -> str:
     resolved_source_field = _resolve_note_field_name(note, source_field)
     if not resolved_source_field:
@@ -1173,7 +1607,16 @@ def _enrich_note(
         return "missing_source"
 
     source = cfg.get("data_source", "custom")
-    details = {"ipa": "", "definition": "", "examples": "", "synonyms": "", "antonyms": "", "image": ""}
+    details = {
+        "ipa": "",
+        "definition": "",
+        "examples": "",
+        "synonyms": "",
+        "antonyms": "",
+        "image": "",
+        "part_of_speech": "",
+        "cefr": "",
+    }
 
     if source == "dictionaryapi":
         actual_payload = payload or _request_dictionary_data(word)
@@ -1186,6 +1629,7 @@ def _enrich_note(
             int(cfg["max_definitions"]),
             int(cfg["max_examples"]),
             selected_definition=selected_definition,
+            selected_part_of_speech=selected_part_of_speech,
         )
     elif source == "cambridge":
         cambridge_html = payload if isinstance(payload, str) else _request_cambridge_html(word)
@@ -1198,6 +1642,7 @@ def _enrich_note(
             int(cfg["max_definitions"]),
             int(cfg["max_examples"]),
             selected_definition=selected_definition,
+            selected_part_of_speech=selected_part_of_speech,
         )
         details["image"] = _localize_cambridge_image_html(details.get("image", ""), word)
         if not any(details.values()):
@@ -1231,6 +1676,7 @@ def _enrich_note(
                 int(cfg["max_definitions"]),
                 int(cfg["max_examples"]),
                 selected_definition=selected_definition,
+                selected_part_of_speech=selected_part_of_speech,
             )
         wk = _request_wordnik_data(word, cfg.get("api_keys", {}).get("wordnik", ""))
         if wk:
@@ -1246,11 +1692,25 @@ def _enrich_note(
         if not any(details.values()):
             return "no_api_result"
     changed = False
+    max_examples = int(cfg["max_examples"])
     for key, target_field in cfg["field_map"].items():
         value = details.get(key, "")
         if not value:
             continue
         field_overwrite = bool(cfg["overwrite_existing"]) or (source == "cambridge" and key == "image")
+        if key == "examples":
+            resolved_examples_field = _resolve_note_field_name(note, target_field)
+            if not resolved_examples_field:
+                continue
+            existing_examples = _parse_examples_list(note[resolved_examples_field])
+            fetched_examples = _parse_examples_list(value)
+            if existing_examples:
+                merged_examples = _merge_example_lists(existing_examples, fetched_examples, max_examples)
+                merged_html = _render_examples_html(merged_examples, word)
+                if merged_html and note[resolved_examples_field] != merged_html:
+                    note[resolved_examples_field] = merged_html
+                    changed = True
+                continue
         if _set_field(note, target_field, value, field_overwrite):
             changed = True
 
@@ -1266,6 +1726,7 @@ def _enrich_note(
 
     if changed:
         note.flush()
+        _flag_note_cards_purple(note)
         return "updated"
     return "skipped"
 
@@ -1423,22 +1884,37 @@ def enrich_current_browser_note(editor: Editor) -> None:
         return
 
     selected_definition = None
+    selected_part_of_speech = None
     payload = None
     if cfg.get("data_source", "custom") in ("dictionaryapi", "custom"):
         payload = _request_dictionary_data(word)
         if payload:
-            definitions = _extract_definition_candidates(payload)
-            selected_definition = _choose_definition_dialog(definitions, parent=parent)
-            if definitions and not selected_definition:
+            choices = _extract_definition_candidates(payload)
+            selected = _choose_definition_dialog(choices, parent=parent)
+            if choices and not selected:
                 return
+            if selected:
+                selected_definition = selected.get("definition", "")
+                selected_part_of_speech = selected.get("part_of_speech", "")
     elif cfg.get("data_source") == "cambridge":
         cambridge_html = _request_cambridge_html(word)
         if cambridge_html:
             senses = _extract_cambridge_senses(cambridge_html)
-            definitions = [s.get("definition", "") for s in senses if s.get("definition")]
-            selected_definition = _choose_definition_dialog(definitions, parent=parent)
-            if definitions and not selected_definition:
+            choices = [
+                {
+                    "definition": s.get("definition", ""),
+                    "part_of_speech": s.get("part_of_speech", ""),
+                    "cefr": s.get("cefr", ""),
+                }
+                for s in senses
+                if s.get("definition")
+            ]
+            selected = _choose_definition_dialog(choices, parent=parent)
+            if choices and not selected:
                 return
+            if selected:
+                selected_definition = selected.get("definition", "")
+                selected_part_of_speech = selected.get("part_of_speech", "")
             payload = cambridge_html
 
     result = _enrich_note(
@@ -1447,6 +1923,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
         cfg,
         payload=payload,
         selected_definition=selected_definition,
+        selected_part_of_speech=selected_part_of_speech,
     )
     if result == "updated":
         mw.reset()
@@ -1500,6 +1977,87 @@ def copy_word_and_definition(editor: Editor) -> None:
     tooltip("Copied word + definition to clipboard.")
 
 
+def generate_image_for_current_note(editor: Editor) -> None:
+    if mw.col is None:
+        return
+    parent = editor.parentWindow
+    if not isinstance(parent, Browser):
+        showInfo("This button is intended for Browser note view.")
+        return
+    if editor.note is None:
+        showInfo("Select a note in Browser first.")
+        return
+
+    cfg = _read_config()
+    working_note = editor.note
+    try:
+        editor.saveNow(lambda: None)
+    except Exception:
+        pass
+    try:
+        db_note = mw.col.get_note(working_note.id)
+        if db_note is not None:
+            working_note = db_note
+    except Exception:
+        pass
+    if working_note is None:
+        showInfo("Select a note in Browser first.")
+        return
+
+    source_field = _resolve_note_field_name(
+        working_note,
+        _auto_heal_source_field(cfg, working_note),
+    )
+    definition_field = _resolve_note_field_name(
+        working_note,
+        cfg.get("field_map", {}).get("definition", "Definition"),
+    )
+    image_field = _resolve_note_field_name(working_note, cfg.get("field_map", {}).get("image", "Image"))
+
+    if not image_field:
+        showInfo("Image field is not configured. Open Browse -> losev -> Settings.")
+        return
+
+    word = _plain_text(working_note[source_field]) if source_field and source_field in working_note else ""
+    definition = (
+        _plain_text(working_note[definition_field])
+        if definition_field and definition_field in working_note
+        else ""
+    )
+    if not word:
+        showInfo("Word field is empty. Fill the source word before generating an image.")
+        return
+    if not definition:
+        showInfo("Definition field is empty. Add a definition before generating an image.")
+        return
+
+    prompt = _build_vocab_image_prompt(word, definition)
+    api_url = cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)
+    token = cfg.get("api_keys", {}).get("image_generation", "")
+
+    mw.progress.start(label="Generating image...", max=0)
+    try:
+        image_data, content_type = _request_generated_image(prompt, api_url, token)
+    finally:
+        mw.progress.finish()
+
+    if not image_data:
+        showInfo(f"Image generation failed.\n\n{LAST_IMAGE_GEN_ERROR or 'Unknown error.'}")
+        return
+
+    local_filename = _save_image_bytes_to_media(image_data, word, "generated", content_type)
+    if not local_filename:
+        showInfo("Could not save the generated image to the media folder.")
+        return
+
+    working_note[image_field] = f'<img src="{html.escape(local_filename, quote=True)}">'
+    working_note.flush()
+    _flag_note_cards_purple(working_note)
+    mw.reset()
+    editor.loadNoteKeepingFocus()
+    tooltip("Image generated and saved to the note.")
+
+
 def open_browser_settings(browser: Browser) -> None:
     cfg = _read_config()
 
@@ -1522,6 +2080,7 @@ def open_browser_settings(browser: Browser) -> None:
         bool(choices["overwrite_existing"]),
         choices["data_source"],
         choices["api_keys"],
+        choices.get("image_generation_api_url"),
     )
     tooltip("Settings saved.")
 
@@ -1545,6 +2104,14 @@ def _add_editor_button(buttons: List[str], editor: Editor) -> List[str]:
         label="📋 Copy W+D",
     )
     buttons.append(copy_button)
+    image_button = editor.addButton(
+        icon=None,
+        cmd="generate_vocab_image",
+        func=lambda ed=editor: generate_image_for_current_note(ed),
+        tip="Generate a vocabulary illustration from word and definition",
+        label="Generate images",
+    )
+    buttons.append(image_button)
     return buttons
 
 
