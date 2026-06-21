@@ -1171,6 +1171,24 @@ def _flag_note_cards_purple(note: Note) -> None:
             continue
 
 
+def _refresh_browser_after_note_change(browser: Browser, editor: Editor, note: Note) -> None:
+    """Sync note changes into the browser editor without resetting the main window."""
+    if editor.note is not None and editor.note.id == note.id:
+        for field_name in note.keys():
+            editor.note[field_name] = note[field_name]
+        editor.loadNoteKeepingFocus()
+    try:
+        browser.table.redraw_cells()
+    except Exception:
+        pass
+    try:
+        browser._renderPreview()
+    except Exception:
+        pass
+    browser.raise_()
+    browser.activateWindow()
+
+
 def _apply_tags(note: Note, tags: List[str]) -> bool:
     changed = False
     for raw_tag in tags:
@@ -2049,8 +2067,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
         selected_part_of_speech=selected_part_of_speech,
     )
     if result == "updated":
-        mw.reset()
-        editor.loadNoteKeepingFocus()
+        _refresh_browser_after_note_change(parent, editor, working_note)
         tooltip("Current note updated.")
     elif result == "skipped":
         showInfo("Nothing changed (fields already filled or no values found).")
@@ -2181,9 +2198,7 @@ def generate_image_for_current_note(editor: Editor) -> None:
         note[image_field] = f'<img src="{html.escape(local_filename, quote=True)}">'
         note.flush()
         _flag_note_cards_purple(note)
-        mw.reset()
-        if editor.note is not None and editor.note.id == note_id:
-            editor.loadNoteKeepingFocus()
+        _refresh_browser_after_note_change(parent, editor, note)
         tooltip("Image generated and saved to the note.")
 
     QueryOp(
