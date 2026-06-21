@@ -16,6 +16,7 @@ from aqt import gui_hooks
 from aqt.browser import Browser
 from aqt.editor import Editor
 from aqt.qt import QAction, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QMenu, Qt, QVBoxLayout, QWidget
+from aqt.operations import QueryOp
 from aqt.utils import askUser, showInfo, tooltip
 
 
@@ -1287,22 +1288,13 @@ def _image_generation_auth_header(token: str) -> str:
 
 
 def _build_vocab_image_prompt(word: str, definition: str) -> str:
+    cleaned_word = _clean(word)
+    cleaned_definition = _clean(definition)
     return (
-        "Create a simple flat design vector illustration for English vocabulary learning.\n\n"
-        f"WORD: {_clean(word)}\n"
-        f"MEANING: {_clean(definition)}\n\n"
-        "Requirements:\n"
-        "- Style: minimalist flat design, simple vector illustration\n"
-        "- Composition: one central object or simple scene that clearly represents the meaning\n"
-        "- Colors: bright but limited palette (4-5 colors maximum)\n"
-        "- NO text, NO labels, NO translations, NO arrows or explanatory elements\n"
-        "- Image should be self-explanatory and unambiguous\n"
-        "- Target audience: adult English learners (A2-B2 level)\n"
-        "- Focus on the specific meaning provided, avoid abstract interpretations\n\n"
-        "Technical specs:\n"
-        "- Square format\n"
-        "- Clean, educational style\n"
-        "- Minimal details, maximum clarity"
+        f'A clean, modern flat vector illustration representing the concept of "{cleaned_word}" '
+        f"({cleaned_definition}). The style is minimalist with smooth lines, solid colors, and soft shading. "
+        "Simple composition, clear narrative, no text, no letters, no words. High quality, educational flashcard "
+        "style, vibrant yet harmonious color palette."
     )
 
 
@@ -1311,23 +1303,28 @@ def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Opt
     LAST_IMAGE_GEN_ERROR = ""
     url = _clean(api_url) or DEFAULT_IMAGE_GENERATION_API_URL
     auth = _image_generation_auth_header(token)
-    if not auth:
-        LAST_IMAGE_GEN_ERROR = "Image generation API token is not configured."
-        return None, ""
-    body = json.dumps({"prompt": prompt}).encode("utf-8")
+    body = json.dumps(
+        {
+            "prompt": prompt,
+            "aspect_ratio": "1:1",
+            "resolution": "1K",
+        }
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "image/*,application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
+    }
+    if auth:
+        headers["Authorization"] = auth
     req = urllib.request.Request(
         url,
         data=body,
-        headers={
-            "Authorization": auth,
-            "Content-Type": "application/json",
-            "Accept": "image/*,application/json",
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/123.0.0.0 Safari/537.36"
-            ),
-        },
+        headers=headers,
         method="POST",
     )
     try:
@@ -2034,28 +2031,40 @@ def generate_image_for_current_note(editor: Editor) -> None:
     prompt = _build_vocab_image_prompt(word, definition)
     api_url = cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)
     token = cfg.get("api_keys", {}).get("image_generation", "")
+    note_id = working_note.id
 
-    mw.progress.start(label="Generating image...", max=0)
-    try:
-        image_data, content_type = _request_generated_image(prompt, api_url, token)
-    finally:
-        mw.progress.finish()
+    def op(_col: Any) -> Tuple[Optional[bytes], str]:
+        return _request_generated_image(prompt, api_url, token)
 
-    if not image_data:
-        showInfo(f"Image generation failed.\n\n{LAST_IMAGE_GEN_ERROR or 'Unknown error.'}")
-        return
+    def on_success(result: Tuple[Optional[bytes], str]) -> None:
+        image_data, content_type = result
+        if not image_data:
+            showInfo(f"Image generation failed.\n\n{LAST_IMAGE_GEN_ERROR or 'Unknown error.'}")
+            return
+        if mw.col is None:
+            return
+        try:
+            note = mw.col.get_note(note_id)
+        except Exception:
+            showInfo("Note no longer available.")
+            return
+        local_filename = _save_image_bytes_to_media(image_data, word, "generated", content_type)
+        if not local_filename:
+            showInfo("Could not save the generated image to the media folder.")
+            return
+        note[image_field] = f'<img src="{html.escape(local_filename, quote=True)}">'
+        note.flush()
+        _flag_note_cards_purple(note)
+        mw.reset()
+        if editor.note is not None and editor.note.id == note_id:
+            editor.loadNoteKeepingFocus()
+        tooltip("Image generated and saved to the note.")
 
-    local_filename = _save_image_bytes_to_media(image_data, word, "generated", content_type)
-    if not local_filename:
-        showInfo("Could not save the generated image to the media folder.")
-        return
-
-    working_note[image_field] = f'<img src="{html.escape(local_filename, quote=True)}">'
-    working_note.flush()
-    _flag_note_cards_purple(working_note)
-    mw.reset()
-    editor.loadNoteKeepingFocus()
-    tooltip("Image generated and saved to the note.")
+    QueryOp(
+        parent=parent,
+        op=op,
+        success=on_success,
+    ).with_progress("Generating image...").without_collection().run_in_background()
 
 
 def open_browser_settings(browser: Browser) -> None:
