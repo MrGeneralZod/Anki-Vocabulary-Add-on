@@ -18,6 +18,7 @@
 
 	<div class="mem-question no-alts memblob">
 		<div>{{Definition}}</div>
+		{{#Part of speech}}<div class="pos-front-field">{{Part of speech}}</div>{{/Part of speech}}
 	</div>
 
 	<div class="mem-typing">
@@ -687,7 +688,19 @@ if (path.getAttribute('d')) return;
 
 <!-- -------------------⚙️ user posterior scripts ⚙️------------------ -->
 <script>
-  //place your scripts here
-
-
+(function () {
+  const el = document.querySelector('.card-content.front .pos-front-field');
+  if (!el || el.querySelector('.pos-front-tag')) return;
+  const raw = (el.textContent || '').trim();
+  if (!raw) return;
+  const label = raw.toLowerCase();
+  const slug = label.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const known = {
+    noun: 1, verb: 1, adjective: 1, adverb: 1, 'phrasal-verb': 1, 'modal-verb': 1,
+    pronoun: 1, preposition: 1, conjunction: 1, interjection: 1, exclamation: 1,
+    determiner: 1, phrase: 1
+  };
+  const cls = known[slug] ? slug : 'other';
+  el.innerHTML = '<span class="pos-front-tag pos-front-' + cls + '">' + label + '</span>';
+})();
 </script>
