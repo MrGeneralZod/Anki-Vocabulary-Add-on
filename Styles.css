@@ -1906,3 +1906,30 @@ body:is(.nightMode, .night_mode) .cefr-b1 { background: #1e3a8a; color: #bfdbfe;
 body:is(.nightMode, .night_mode) .cefr-b2 { background: #312e81; color: #c7d2fe; }
 body:is(.nightMode, .night_mode) .cefr-c1 { background: #78350f; color: #fde68a; }
 body:is(.nightMode, .night_mode) .cefr-c2 { background: #7f1d1d; color: #fecaca; }
+
+.note-tags-field {
+  margin-top: 0.25rem;
+}
+
+.note-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.note-tag {
+  display: inline-block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.2em 0.55em;
+  border-radius: 0.35em;
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+  background: #f3f4f6;
+  color: #4b5563;
+}
+
+body:is(.nightMode, .night_mode) .note-tag {
+  background: #374151;
+  color: #d1d5db;
+}
