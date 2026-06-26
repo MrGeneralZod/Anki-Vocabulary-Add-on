@@ -1086,27 +1086,83 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
     return fallback
 
 
-def _extract_cambridge_global_usage_labels(html_text: str) -> List[str]:
-    first_def_block_idx = html_text.lower().find("def-block")
-    scope = html_text if first_def_block_idx < 0 else html_text[:first_def_block_idx]
-    labels: List[str] = []
-    for match in re.finditer(
-        r'<span[^>]*class=["\'][^"\']*\b(?:usage|dusage)\b[^"\']*["\'][^>]*>(.*?)</span>',
-        scope,
-        flags=re.IGNORECASE | re.DOTALL,
-    ):
-        raw = re.sub(r"<[^>]+>", " ", match.group(1))
-        text = _clean(html.unescape(raw))
-        if text:
-            labels.append(text)
-    out: List[str] = []
-    seen = set()
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F1E0-\U0001F1FF"
+    "\U0001F300-\U0001FAFF"
+    "\U00002700-\U000027BF"
+    "\U00002600-\U000026FF"
+    "\ufe0f"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _strip_emoji(text: str) -> str:
+    return _clean(_EMOJI_RE.sub(" ", text or ""))
+
+
+def _tag_match_key(text: str) -> str:
+    base = _strip_emoji(text).lower()
+    base = base.replace("-", "_").replace(" ", "_")
+    return re.sub(r"_+", "_", base).strip("_")
+
+
+def _build_existing_tag_lookup(existing_tags: List[str]) -> Dict[str, str]:
+    lookup: Dict[str, str] = {}
+    for tag in existing_tags:
+        raw = _clean(str(tag))
+        if not raw:
+            continue
+        key = _tag_match_key(raw)
+        if key and key not in lookup:
+            lookup[key] = raw
+    return lookup
+
+
+def _resolve_usage_labels_to_existing_tags(
+    labels: List[str],
+    tag_map: Dict[str, str],
+    existing_tags: Optional[List[str]] = None,
+) -> List[str]:
+    """Map Cambridge usage labels to tags that already exist in the collection."""
+    if existing_tags is None:
+        if mw.col is None:
+            return []
+        try:
+            existing_tags = list(mw.col.tags.all())
+        except Exception:
+            return []
+    if not existing_tags:
+        return []
+
+    existing_set = set(existing_tags)
+    lookup = _build_existing_tag_lookup(existing_tags)
+    normalized_map = {_tag_match_key(k): v for k, v in tag_map.items() if _clean(k) and _clean(v)}
+
+    resolved: List[str] = []
+    seen: set[str] = set()
     for label in labels:
-        key = label.lower()
-        if key not in seen:
-            out.append(label)
-            seen.add(key)
-    return out
+        label_clean = _clean(label)
+        if not label_clean:
+            continue
+
+        candidates: List[str] = []
+        mapped = tag_map.get(label_clean) or tag_map.get(label_clean.lower())
+        if mapped:
+            candidates.append(_clean(mapped))
+        map_key = _tag_match_key(label_clean)
+        if map_key in normalized_map:
+            candidates.append(_clean(normalized_map[map_key]))
+        if map_key in lookup:
+            candidates.append(lookup[map_key])
+
+        for candidate in candidates:
+            if candidate in existing_set and candidate not in seen:
+                resolved.append(candidate)
+                seen.add(candidate)
+                break
+    return resolved
 
 
 def _extract_from_cambridge(
@@ -1139,7 +1195,6 @@ def _extract_from_cambridge(
     chosen_image_url = ""
     chosen_part_of_speech = ""
     chosen_cefr = ""
-    global_labels = _extract_cambridge_global_usage_labels(html_text)
     if selected_definition:
         for sense in senses:
             if sense.get("definition") == selected_definition and (
@@ -1169,7 +1224,7 @@ def _extract_from_cambridge(
     uniq_examples = unique(chosen_examples)[:max_examples]
     uniq_synonyms = unique([_clean(x) for x in chosen_synonyms if _clean(x)])
     uniq_antonyms = unique([_clean(x) for x in chosen_antonyms if _clean(x)])
-    uniq_labels = unique(chosen_labels + global_labels)
+    uniq_labels = unique(chosen_labels)
     examples_html = _render_examples_html(uniq_examples, word)
 
     return {
@@ -1240,7 +1295,7 @@ def _refresh_editor_after_note_change(editor: Editor, note: Note) -> None:
 def _apply_tags(note: Note, tags: List[str]) -> bool:
     changed = False
     for raw_tag in tags:
-        tag = _clean(raw_tag).replace(" ", "_")
+        tag = _clean(raw_tag)
         if not tag:
             continue
         try:
@@ -1536,31 +1591,6 @@ def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Opt
         LAST_IMAGE_GEN_ERROR = data.decode("utf-8", errors="replace")[:300]
         return None, ""
     return data, content_type
-
-
-def _find_existing_emoji_variant(base_label_tag: str) -> Optional[str]:
-    if mw.col is None:
-        return None
-    try:
-        existing_tags = mw.col.tags.all()
-    except Exception:
-        return None
-    if not existing_tags:
-        return None
-
-    normalized = _clean(base_label_tag).replace(" ", "_")
-    if not normalized:
-        return None
-
-    emoji_suffix_re = re.compile(
-        rf"^{re.escape(normalized)}[\u2600-\u27BF\U0001F300-\U0001FAFF\U0001F1E6-\U0001F1FF\ufe0f]+$",
-        flags=re.IGNORECASE,
-    )
-    for tag in existing_tags:
-        candidate = _clean(str(tag)).replace(" ", "_")
-        if emoji_suffix_re.match(candidate):
-            return candidate
-    return None
 
 
 def _merge_non_empty(base: Dict[str, str], extra: Dict[str, str]) -> Dict[str, str]:
@@ -1911,12 +1941,12 @@ def _enrich_note(
 
     if source == "cambridge" and bool(cfg.get("cambridge_usage_tags_enabled", True)):
         labels_raw = details.get("usage_labels", "")
-        labels = [_clean(x).lower() for x in labels_raw.split(cfg["separator"]) if _clean(x)]
-        tags_to_add: List[str] = []
-        for label in labels:
-            emoji_variant = _find_existing_emoji_variant(label)
-            tags_to_add.append(emoji_variant if emoji_variant else label)
-        if _apply_tags(note, tags_to_add):
+        labels = [_clean(x) for x in labels_raw.split(cfg["separator"]) if _clean(x)]
+        tags_to_add = _resolve_usage_labels_to_existing_tags(
+            labels,
+            cfg.get("cambridge_usage_tag_map", {}),
+        )
+        if tags_to_add and _apply_tags(note, tags_to_add):
             changed = True
 
     if changed:

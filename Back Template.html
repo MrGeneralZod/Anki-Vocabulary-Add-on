@@ -59,6 +59,14 @@
 			</div>
 		{{/Audio}}
 
+		{{#Tags}}
+			<div class="sep"></div>
+			<div class="mem-field no-alts note-tags-field">
+				<label>Tags</label>
+				<div class="note-tags">{{Tags}}</div>
+			</div>
+		{{/Tags}}
+
 	</div>	
 </div>
 
@@ -459,5 +467,18 @@ document.querySelectorAll('.card-content.back a.replay-button').forEach((a) => {
   const level = (el.textContent || '').trim().toUpperCase();
   if (!/^(A1|A2|B1|B2|C1|C2)$/.test(level)) return;
   el.innerHTML = '<span class="cefr-tag cefr-' + level.toLowerCase() + '">' + level + '</span>';
+})();
+
+(function () {
+  const el = document.querySelector('.card-content.back .note-tags');
+  if (!el || el.querySelector('.note-tag')) return;
+  const raw = (el.textContent || '').trim();
+  if (!raw) return;
+  const tags = raw.split(/\s+/).filter(Boolean);
+  if (!tags.length) return;
+  el.innerHTML = tags.map(function (tag) {
+    const safe = typeof htmlEscape === 'function' ? htmlEscape(tag) : tag;
+    return '<span class="note-tag">' + safe + '</span>';
+  }).join('');
 })();
 </script>
