@@ -1212,22 +1212,29 @@ def _flag_note_cards_purple(note: Note) -> None:
             continue
 
 
-def _refresh_browser_after_note_change(browser: Browser, editor: Editor, note: Note) -> None:
-    """Sync note changes into the browser editor without resetting the main window."""
+def _editor_dialog_parent(editor: Editor) -> QWidget:
+    return editor.parentWindow or mw
+
+
+def _refresh_editor_after_note_change(editor: Editor, note: Note) -> None:
+    """Sync note changes into the open editor (Browser, Add, or Edit)."""
     if editor.note is not None and editor.note.id == note.id:
         for field_name in note.keys():
             editor.note[field_name] = note[field_name]
         editor.loadNoteKeepingFocus()
+    parent = editor.parentWindow
+    if not isinstance(parent, Browser):
+        return
     try:
-        browser.table.redraw_cells()
+        parent.table.redraw_cells()
     except Exception:
         pass
     try:
-        browser._renderPreview()
+        parent._renderPreview()
     except Exception:
         pass
-    browser.raise_()
-    browser.activateWindow()
+    parent.raise_()
+    parent.activateWindow()
 
 
 def _apply_tags(note: Note, tags: List[str]) -> bool:
@@ -2011,12 +2018,9 @@ def enrich_current_browser_note(editor: Editor) -> None:
     global LAST_API_ERROR
     if mw.col is None:
         return
-    parent = editor.parentWindow
-    if not isinstance(parent, Browser):
-        showInfo("This button is intended for Browser note view.")
-        return
+    parent = _editor_dialog_parent(editor)
     if editor.note is None:
-        showInfo("Select a note in Browser first.")
+        showInfo("Open a note in the editor first.")
         return
 
     cfg = _read_config()
@@ -2027,7 +2031,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
 
     working_note = editor.note
     if working_note is None:
-        showInfo("Select a note in Browser first.")
+        showInfo("Open a note in the editor first.")
         return
     try:
         db_note = mw.col.get_note(working_note.id)
@@ -2114,7 +2118,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
         selected_part_of_speech=selected_part_of_speech,
     )
     if result == "updated":
-        _refresh_browser_after_note_change(parent, editor, working_note)
+        _refresh_editor_after_note_change(editor, working_note)
         tooltip("Current note updated.")
     elif result == "skipped":
         showInfo("Nothing changed (fields already filled or no values found).")
@@ -2133,18 +2137,14 @@ def enrich_current_browser_note(editor: Editor) -> None:
 def copy_word_and_definition(editor: Editor) -> None:
     if mw.col is None:
         return
-    parent = editor.parentWindow
-    if not isinstance(parent, Browser):
-        showInfo("This button is intended for Browser note view.")
-        return
     if editor.note is None:
-        showInfo("Select a note in Browser first.")
+        showInfo("Open a note in the editor first.")
         return
 
     cfg = _read_config()
     working_note = editor.note
     if working_note is None:
-        showInfo("Select a note in Browser first.")
+        showInfo("Open a note in the editor first.")
         return
 
     source_field = _auto_heal_source_field(cfg, working_note)
@@ -2167,12 +2167,9 @@ def copy_word_and_definition(editor: Editor) -> None:
 def generate_image_for_current_note(editor: Editor) -> None:
     if mw.col is None:
         return
-    parent = editor.parentWindow
-    if not isinstance(parent, Browser):
-        showInfo("This button is intended for Browser note view.")
-        return
+    parent = _editor_dialog_parent(editor)
     if editor.note is None:
-        showInfo("Select a note in Browser first.")
+        showInfo("Open a note in the editor first.")
         return
 
     cfg = _read_config()
@@ -2188,7 +2185,7 @@ def generate_image_for_current_note(editor: Editor) -> None:
     except Exception:
         pass
     if working_note is None:
-        showInfo("Select a note in Browser first.")
+        showInfo("Open a note in the editor first.")
         return
 
     source_field = _resolve_note_field_name(
@@ -2245,7 +2242,7 @@ def generate_image_for_current_note(editor: Editor) -> None:
         note[image_field] = f'<img src="{html.escape(local_filename, quote=True)}">'
         note.flush()
         _flag_note_cards_purple(note)
-        _refresh_browser_after_note_change(parent, editor, note)
+        _refresh_editor_after_note_change(editor, note)
         tooltip("Image generated and saved to the note.")
 
     QueryOp(
@@ -2283,8 +2280,6 @@ def open_browser_settings(browser: Browser) -> None:
 
 
 def _add_editor_button(buttons: List[str], editor: Editor) -> List[str]:
-    if not isinstance(editor.parentWindow, Browser):
-        return buttons
     button = editor.addButton(
         icon=None,
         cmd="vocab_enrich_current_note",
