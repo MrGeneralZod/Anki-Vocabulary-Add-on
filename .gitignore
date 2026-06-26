@@ -209,3 +209,4 @@ __marimo__/
 # OS
 .DS_Store
 Thumbs.db
+/.vs
