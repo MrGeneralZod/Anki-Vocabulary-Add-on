@@ -26,6 +26,16 @@
 			<h3>{{Definition}}</h3>
 		</div>
 
+		{{#Explanation}}
+		<div class="mem-field no-alts explanation-block">
+			<button id="explain-btn" type="button" class="explain-btn" aria-expanded="false">Explain</button>
+			<div id="explanation-panel" class="explanation-panel" hidden>
+				<label>Explanation</label>
+				<h4>{{Explanation}}</h4>
+			</div>
+		</div>
+		{{/Explanation}}
+
 		<div class="sep"></div>
 
 		{{#Image}}
@@ -461,6 +471,64 @@ document.querySelectorAll('.card-content.back a.replay-button').forEach((a) => {
 
 <!-- -------------------⚙️ user posterior scripts ⚙️------------------ -->
 <script>
+(function () {
+  var panel = document.getElementById('explanation-panel');
+  var btn = document.getElementById('explain-btn');
+  if (!panel) return;
+
+  function revealExplanation() {
+    panel.hidden = false;
+    if (btn) {
+      btn.textContent = 'Hide explanation';
+      btn.setAttribute('aria-expanded', 'true');
+    }
+  }
+
+  function hideExplanation() {
+    panel.hidden = true;
+    if (btn) {
+      btn.textContent = 'Explain';
+      btn.setAttribute('aria-expanded', 'false');
+    }
+  }
+
+  function toggleExplanation() {
+    if (panel.hidden) {
+      revealExplanation();
+    } else {
+      hideExplanation();
+    }
+  }
+
+  function whenBacksideVisible(callback) {
+    var backwrap = document.getElementById('backwrap');
+    if (!backwrap) return;
+    if (backwrap.classList.contains('backside')) {
+      callback();
+      return;
+    }
+    var observer = new MutationObserver(function () {
+      if (backwrap.classList.contains('backside')) {
+        observer.disconnect();
+        callback();
+      }
+    });
+    observer.observe(backwrap, { attributes: true, attributeFilter: ['class'] });
+  }
+
+  if (btn) {
+    btn.addEventListener('click', function (event) {
+      event.preventDefault();
+      toggleExplanation();
+    });
+  }
+
+  if (sessionStorage.getItem('showExplanation') === '1') {
+    sessionStorage.removeItem('showExplanation');
+    whenBacksideVisible(revealExplanation);
+  }
+})();
+
 (function () {
   const el = document.querySelector('.cefr-field');
   if (!el || el.querySelector('.cefr-tag')) return;
