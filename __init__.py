@@ -452,10 +452,56 @@ def _definition_choice_label(choice: Dict[str, str]) -> str:
     definition = _normalize_definition(choice.get("definition", ""))
     pos = _clean(choice.get("part_of_speech", ""))
     cefr = _clean(choice.get("cefr", ""))
+    meaning_type = _clean(choice.get("meaning_type", ""))
+    if meaning_type and definition:
+        definition = f"{meaning_type} {definition}"
     prefix_parts = [p for p in (cefr, pos) if p]
     if prefix_parts and definition:
         return f"{' · '.join(prefix_parts)}: {definition}"
     return definition
+
+
+def _extract_cambridge_guideword_before(html_text: str, position: int) -> str:
+    """Extract Cambridge guideword like (OBTAIN) from the dsense section that owns this def-block."""
+    dsense_matches = list(
+        re.finditer(
+            r'<div[^>]*class=["\'][^"\']*\bdsense\b[^"\']*["\'][^>]*>',
+            html_text,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not dsense_matches:
+        return ""
+
+    sense_start = None
+    sense_end = None
+    for i, match in enumerate(dsense_matches):
+        start = match.start()
+        end = dsense_matches[i + 1].start() if i + 1 < len(dsense_matches) else len(html_text)
+        if start <= position < end and (sense_start is None or start > sense_start):
+            sense_start = start
+            sense_end = end
+
+    if sense_start is None or sense_end is None:
+        return ""
+
+    chunk = html_text[sense_start : min(sense_start + 1200, sense_end)]
+    h3 = re.search(
+        r'<h3[^>]*class=["\'][^"\']*\bdsense_h\b[^"\']*["\'][^>]*>.*?</h3>',
+        chunk,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not h3:
+        return ""
+    gw_match = re.search(
+        r'<span[^>]*class=["\'][^"\']*\bguideword\b[^"\']*\bdsense_gw\b[^"\']*["\'][^>]*>',
+        h3.group(0),
+        flags=re.IGNORECASE,
+    )
+    if not gw_match:
+        return ""
+    raw = re.sub(r"<[^>]+>", "", h3.group(0)[gw_match.end() :])
+    return _clean(html.unescape(raw))
 
 
 def _extract_cambridge_cefr(block_html: str) -> str:
@@ -1049,15 +1095,17 @@ def _extract_cambridge_senses(html_text: str) -> List[Dict[str, Any]]:
         context = html_text[max(0, start - pos_lookback) : min(len(html_text), start + pos_lookahead)]
         pos = _cambridge_part_of_speech_at(start, pos_timeline, context)
         cefr = _extract_cambridge_cefr(part)
+        meaning_type = _extract_cambridge_guideword_before(html_text, start)
 
-        if not definition or (definition, pos) in seen_pairs:
+        if not definition or (definition, pos, meaning_type) in seen_pairs:
             continue
-        seen_pairs.add((definition, pos))
+        seen_pairs.add((definition, pos, meaning_type))
         senses.append(
             {
                 "definition": definition,
                 "part_of_speech": pos,
                 "cefr": cefr,
+                "meaning_type": meaning_type,
                 "examples": [e for e in parser.examples if _clean(e)],
                 "synonyms": [s for s in parser.synonyms if _clean(s)],
                 "antonyms": [a for a in parser.antonyms if _clean(a)],
@@ -1202,6 +1250,7 @@ def _extract_from_cambridge(
     max_examples: int,
     selected_definition: Optional[str] = None,
     selected_part_of_speech: Optional[str] = None,
+    selected_meaning_type: Optional[str] = None,
 ) -> Dict[str, str]:
     ipa = _extract_cambridge_ipa(html_text)
     audio_url = _extract_cambridge_uk_audio_url(html_text, word)
@@ -1228,6 +1277,8 @@ def _extract_from_cambridge(
         for sense in senses:
             if sense.get("definition") == selected_definition and (
                 not selected_part_of_speech or sense.get("part_of_speech", "") == selected_part_of_speech
+            ) and (
+                not selected_meaning_type or sense.get("meaning_type", "") == selected_meaning_type
             ):
                 chosen_definitions = [selected_definition]
                 chosen_examples = list(sense.get("examples", []))
@@ -1842,6 +1893,7 @@ def _enrich_note(
     payload: Optional[Any] = None,
     selected_definition: Optional[str] = None,
     selected_part_of_speech: Optional[str] = None,
+    selected_meaning_type: Optional[str] = None,
 ) -> str:
     resolved_source_field = _resolve_note_field_name(note, source_field)
     if not resolved_source_field:
@@ -1888,6 +1940,7 @@ def _enrich_note(
             int(cfg["max_examples"]),
             selected_definition=selected_definition,
             selected_part_of_speech=selected_part_of_speech,
+            selected_meaning_type=selected_meaning_type,
         )
         details["image"] = _localize_cambridge_image_html(details.get("image", ""), word)
         details["audio"] = _localize_cambridge_audio(details.get("audio", ""), word)
@@ -2136,6 +2189,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
 
     selected_definition = None
     selected_part_of_speech = None
+    selected_meaning_type = None
     payload = None
     if cfg.get("data_source", "custom") in ("dictionaryapi", "custom"):
         payload = _request_dictionary_data(word)
@@ -2156,6 +2210,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
                     "definition": s.get("definition", ""),
                     "part_of_speech": s.get("part_of_speech", ""),
                     "cefr": s.get("cefr", ""),
+                    "meaning_type": s.get("meaning_type", ""),
                 }
                 for s in senses
                 if s.get("definition")
@@ -2166,6 +2221,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
             if selected:
                 selected_definition = selected.get("definition", "")
                 selected_part_of_speech = selected.get("part_of_speech", "")
+                selected_meaning_type = selected.get("meaning_type", "")
             payload = cambridge_html
 
     result = _enrich_note(
@@ -2175,6 +2231,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
         payload=payload,
         selected_definition=selected_definition,
         selected_part_of_speech=selected_part_of_speech,
+        selected_meaning_type=selected_meaning_type,
     )
     if result == "updated":
         _refresh_editor_after_note_change(editor, working_note)
