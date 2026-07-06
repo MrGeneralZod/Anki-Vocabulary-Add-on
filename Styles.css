@@ -1933,3 +1933,48 @@ body:is(.nightMode, .night_mode) .note-tag {
   background: #374151;
   color: #d1d5db;
 }
+
+/* Explanation toggle */
+.explain-front-wrap {
+  text-align: center;
+  margin: 0.5rem 0 0.75rem;
+}
+
+.explain-btn {
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 0.4rem 0.9rem;
+  border-radius: var(--border-r2);
+  border: 1px solid var(--col-input-border);
+  background: var(--col-button-bg);
+  color: var(--col-button-text);
+  cursor: pointer;
+  width: max-content;
+  margin: 0 auto;
+  display: block;
+}
+
+.explain-btn:hover {
+  filter: brightness(0.97);
+}
+
+.explain-btn:active {
+  filter: brightness(0.94);
+}
+
+.explanation-block {
+  text-align: center;
+}
+
+.explanation-block .explain-btn {
+  margin-bottom: 0.25rem;
+}
+
+.explanation-panel {
+  text-align: left;
+  margin-top: 0.5rem;
+}
+
+.explanation-panel[hidden] {
+  display: none !important;
+}
