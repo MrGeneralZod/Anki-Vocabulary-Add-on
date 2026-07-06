@@ -26,6 +26,16 @@
 			<h3>{{Definition}}</h3>
 		</div>
 
+		{{^Explanation}}
+		<div class="mem-field no-alts explanation-block explanation-generate">
+			<button id="generate-explain-btn" type="button" class="explain-btn">Generate explanation</button>
+			<div id="generate-explain-loader" class="explain-loader" hidden aria-live="polite">
+				<span class="explain-loader-spinner"></span>
+				<span>Generating explanation…</span>
+			</div>
+		</div>
+		{{/Explanation}}
+
 		{{#Explanation}}
 		<div class="mem-field no-alts explanation-block">
 			<button id="explain-btn" type="button" class="explain-btn" aria-expanded="false">Explain</button>
@@ -471,6 +481,24 @@ document.querySelectorAll('.card-content.back a.replay-button').forEach((a) => {
 
 <!-- -------------------⚙️ user posterior scripts ⚙️------------------ -->
 <script>
+(function () {
+  var btn = document.getElementById('generate-explain-btn');
+  if (!btn) return;
+  if (typeof platform !== 'undefined' && platform !== 'desk') {
+    btn.style.display = 'none';
+    return;
+  }
+
+  btn.addEventListener('click', function (event) {
+    event.preventDefault();
+    if (btn.disabled) return;
+    btn.disabled = true;
+    var loader = document.getElementById('generate-explain-loader');
+    if (loader) loader.hidden = false;
+    pycmd('vocabEnrich:generateExplanation');
+  });
+})();
+
 (function () {
   var panel = document.getElementById('explanation-panel');
   var btn = document.getElementById('explain-btn');

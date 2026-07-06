@@ -9,7 +9,8 @@
     "image": "Image",
     "audio": "Audio",
     "part_of_speech": "Part of speech",
-    "cefr": "CEFR"
+    "cefr": "CEFR",
+    "explanation": "Explanation"
   },
   "separator": "; ",
   "overwrite_existing": false,
