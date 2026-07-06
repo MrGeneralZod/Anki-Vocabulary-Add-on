@@ -41,21 +41,29 @@ from aqt.utils import askUser, disable_help_button, showInfo, tooltip
 MENU_LABEL = "Enrich Vocabulary Fields"
 LAST_API_ERROR = ""
 LAST_IMAGE_GEN_ERROR = ""
+LAST_EXPLAIN_ERROR = ""
 IMAGE_GEN_CANCELLED_MSG = "Cancelled by user."
+_EXPLAIN_PYCMD = "vocabEnrich:generateExplanation"
 _IMAGE_GEN_CANCEL_CONFIRMED = False
 
 
-class ImageGenProgressDialog(QDialog):
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+class ApiProgressDialog(QDialog):
+    def __init__(
+        self,
+        message: str = "Generating image...",
+        cancel_message: str = "Generation is still in progress.\n\nCancel anyway?",
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         disable_help_button(self)
         self._finished = False
+        self._cancel_message = cancel_message
         self.setWindowTitle("Anki")
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setMinimumWidth(300)
 
         layout = QVBoxLayout(self)
-        label = QLabel("Generating image...", self)
+        label = QLabel(message, self)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(label)
 
@@ -74,7 +82,7 @@ class ImageGenProgressDialog(QDialog):
             QMessageBox.question(
                 self,
                 "Anki",
-                "Image generation is still in progress.\n\nCancel anyway?",
+                self._cancel_message,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -102,6 +110,10 @@ class ImageGenProgressDialog(QDialog):
             self.close()
             return
         super().keyPressEvent(evt)
+
+
+ImageGenProgressDialog = ApiProgressDialog
+
 DEFAULT_IMAGE_GENERATION_API_URL = "https://free-image-generation-api.lokiyan1996.workers.dev/"
 ENRICHED_CARD_FLAG = 7  # Purple flag (Ctrl+7 in Browser)
 DEFAULT_CONFIG = {
@@ -116,6 +128,7 @@ DEFAULT_CONFIG = {
         "audio": "Audio",
         "part_of_speech": "Part of speech",
         "cefr": "CEFR",
+        "explanation": "Explanation",
     },
     "separator": "; ",
     "overwrite_existing": False,
@@ -1823,6 +1836,149 @@ def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Opt
     return data, content_type
 
 
+def _explain_api_url(cfg: Dict[str, Any]) -> str:
+    base = _clean(cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)) or DEFAULT_IMAGE_GENERATION_API_URL
+    if not base.endswith("/"):
+        base += "/"
+    return base + "explain"
+
+
+def _note_explanation_field(note: Note, cfg: Dict[str, Any]) -> Optional[str]:
+    return _resolve_note_field_name(note, cfg.get("field_map", {}).get("explanation", "Explanation"))
+
+
+def _note_explanation_plain(note: Note, cfg: Dict[str, Any]) -> str:
+    field_name = _note_explanation_field(note, cfg)
+    if not field_name:
+        return ""
+    return _plain_text(note[field_name])
+
+
+def _note_has_explanation(note: Note, cfg: Dict[str, Any]) -> bool:
+    return bool(_note_explanation_plain(note, cfg))
+
+
+def _note_word_and_definition(note: Note, cfg: Dict[str, Any]) -> Tuple[str, str]:
+    source_field = _resolve_note_field_name(note, _auto_heal_source_field(cfg, note))
+    definition_field = _resolve_note_field_name(
+        note,
+        cfg.get("field_map", {}).get("definition", "Definition"),
+    )
+    word = _plain_text(note[source_field]) if source_field and source_field in note else ""
+    definition = (
+        _plain_text(note[definition_field])
+        if definition_field and definition_field in note
+        else ""
+    )
+    return word, definition
+
+
+def _request_word_explanation(word: str, definition: str, api_url: str, token: str) -> Optional[str]:
+    global LAST_EXPLAIN_ERROR
+    LAST_EXPLAIN_ERROR = ""
+    auth = _image_generation_auth_header(token)
+    body = json.dumps(
+        {
+            "word": _clean(word),
+            "definition": _clean(definition),
+        }
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
+    }
+    if auth:
+        headers["Authorization"] = auth
+    req = urllib.request.Request(
+        api_url,
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        LAST_EXPLAIN_ERROR = f"HTTP {exc.code}: {detail or exc.reason}"
+        return None
+    except Exception as exc:
+        LAST_EXPLAIN_ERROR = str(exc)
+        return None
+
+    explanation = _clean(str(payload.get("explanation", "")))
+    if not explanation:
+        LAST_EXPLAIN_ERROR = "Empty explanation in API response."
+        return None
+    return explanation
+
+
+def _generate_explanation_for_note(note: Note, cfg: Dict[str, Any]) -> str:
+    if _note_has_explanation(note, cfg):
+        return "skipped"
+    explanation_field = _note_explanation_field(note, cfg)
+    if not explanation_field:
+        return "missing_field"
+    word, definition = _note_word_and_definition(note, cfg)
+    if not word:
+        return "missing_word"
+    if not definition:
+        return "missing_definition"
+    explanation = _request_word_explanation(
+        word,
+        definition,
+        _explain_api_url(cfg),
+        cfg.get("api_keys", {}).get("image_generation", ""),
+    )
+    if not explanation:
+        return "api_error"
+    note[explanation_field] = explanation
+    if not _persist_note_changes(note):
+        return "updated_unsaved"
+    _flag_note_cards_purple(note)
+    return "updated"
+
+
+_JS_RESET_GENERATE_EXPLAIN = """
+(function() {
+  var btn = document.getElementById('generate-explain-btn');
+  var loader = document.getElementById('generate-explain-loader');
+  if (btn) { btn.disabled = false; }
+  if (loader) { loader.hidden = true; }
+})();
+"""
+
+
+def _reset_reviewer_generate_explain_ui() -> None:
+    reviewer = getattr(mw, "reviewer", None)
+    if reviewer is None or reviewer.web is None:
+        return
+    try:
+        reviewer.web.eval(_JS_RESET_GENERATE_EXPLAIN)
+    except Exception:
+        pass
+
+
+def _refresh_reviewer_after_explanation() -> None:
+    reviewer = getattr(mw, "reviewer", None)
+    if reviewer is None or reviewer.card is None:
+        return
+    try:
+        reviewer.card.load()
+        reviewer._showAnswer()
+    except Exception:
+        pass
+
+
 def _merge_non_empty(base: Dict[str, str], extra: Dict[str, str]) -> Dict[str, str]:
     merged = base.copy()
     for key, value in extra.items():
@@ -1923,6 +2079,7 @@ def _show_field_mapping_dialog(
         "audio": "Audio field:",
         "part_of_speech": "Part of speech field:",
         "cefr": "CEFR field:",
+        "explanation": "Explanation field:",
     }
     target_combos: Dict[str, QComboBox] = {}
     for key, label in map_labels.items():
@@ -2478,7 +2635,7 @@ def generate_image_for_current_note(editor: Editor) -> None:
     note_id = working_note.id
 
     _reset_image_gen_cancel()
-    progress_dialog = ImageGenProgressDialog(parent)
+    progress_dialog = ApiProgressDialog("Generating image...", parent=parent)
     progress_dialog.show()
 
     def op(_col: Any) -> Tuple[Optional[bytes], str]:
@@ -2525,6 +2682,155 @@ def generate_image_for_current_note(editor: Editor) -> None:
         op=op,
         success=on_success,
     ).failure(on_failure).without_collection().run_in_background()
+
+
+def generate_explanation_for_current_note(editor: Editor) -> None:
+    if mw.col is None:
+        return
+    parent = _editor_dialog_parent(editor)
+    if editor.note is None:
+        showInfo("Open a note in the editor first.")
+        return
+
+    cfg = _read_config()
+    try:
+        editor.saveNow(lambda: None)
+    except Exception:
+        pass
+    working_note = _resolve_editor_note(editor)
+    if working_note is None:
+        showInfo("Open a note in the editor first.")
+        return
+
+    if _note_has_explanation(working_note, cfg):
+        tooltip("Explanation already exists for this note.")
+        return
+
+    explanation_field = _note_explanation_field(working_note, cfg)
+    if not explanation_field:
+        showInfo("Explanation field is not configured. Open Browse -> losev -> Settings.")
+        return
+
+    word, definition = _note_word_and_definition(working_note, cfg)
+    if not word:
+        showInfo("Word field is empty. Fill the source word before generating an explanation.")
+        return
+    if not definition:
+        showInfo("Definition field is empty. Add a definition before generating an explanation.")
+        return
+
+    note_id = working_note.id
+    progress_dialog = ApiProgressDialog("Generating explanation...", parent=parent)
+    progress_dialog.show()
+
+    def op(_col: Any) -> str:
+        if mw.col is None:
+            return "api_error"
+        try:
+            note = mw.col.get_note(note_id) if note_id else working_note
+        except Exception:
+            return "api_error"
+        return _generate_explanation_for_note(note, cfg)
+
+    def finish_progress() -> None:
+        if progress_dialog.isVisible():
+            progress_dialog.mark_finished()
+
+    def on_success(result: str) -> None:
+        finish_progress()
+        if result == "skipped":
+            tooltip("Explanation already exists for this note.")
+            return
+        if result == "missing_word":
+            showInfo("Word field is empty. Fill the source word before generating an explanation.")
+            return
+        if result == "missing_definition":
+            showInfo("Definition field is empty. Add a definition before generating an explanation.")
+            return
+        if result == "missing_field":
+            showInfo("Explanation field is not configured. Open Browse -> losev -> Settings.")
+            return
+        if result == "api_error":
+            showInfo(f"Explanation generation failed.\n\n{LAST_EXPLAIN_ERROR or 'Unknown error.'}")
+            return
+        if mw.col is None:
+            return
+        try:
+            note = mw.col.get_note(note_id) if note_id else working_note
+        except Exception:
+            showInfo("Note no longer available.")
+            return
+        _refresh_editor_after_note_change(editor, note)
+        if result == "updated_unsaved":
+            tooltip("Explanation saved to note fields. Save or add the note to keep changes.")
+        else:
+            tooltip("Explanation generated and saved to the note.")
+
+    def on_failure(_exc: Exception) -> None:
+        finish_progress()
+
+    QueryOp(
+        parent=parent,
+        op=op,
+        success=on_success,
+    ).failure(on_failure).without_collection().run_in_background()
+
+
+def _generate_explanation_from_reviewer() -> None:
+    if mw.col is None:
+        return
+    reviewer = getattr(mw, "reviewer", None)
+    if reviewer is None or reviewer.card is None:
+        return
+
+    cfg = _read_config()
+    note_id = reviewer.card.nid
+    parent = reviewer.web
+
+    def op(_col: Any) -> str:
+        if mw.col is None:
+            return "api_error"
+        try:
+            note = mw.col.get_note(note_id)
+        except Exception:
+            return "api_error"
+        return _generate_explanation_for_note(note, cfg)
+
+    def on_success(result: str) -> None:
+        if result == "skipped":
+            _refresh_reviewer_after_explanation()
+            return
+        if result in ("missing_word", "missing_definition", "missing_field"):
+            _reset_reviewer_generate_explain_ui()
+            tooltip("Word and definition are required to generate an explanation.")
+            return
+        if result == "api_error":
+            _reset_reviewer_generate_explain_ui()
+            tooltip(f"Explanation generation failed: {LAST_EXPLAIN_ERROR or 'Unknown error.'}")
+            return
+        _refresh_reviewer_after_explanation()
+        tooltip("Explanation generated and saved to the note.")
+
+    def on_failure(_exc: Exception) -> None:
+        _reset_reviewer_generate_explain_ui()
+        tooltip("Explanation generation failed.")
+
+    QueryOp(
+        parent=parent,
+        op=op,
+        success=on_success,
+    ).failure(on_failure).without_collection().run_in_background()
+
+
+def _on_webview_js_message(handled: Tuple[bool, Any], message: str, context: Any) -> Tuple[bool, Any]:
+    if message != _EXPLAIN_PYCMD:
+        return handled
+    from aqt.reviewer import Reviewer
+
+    if not isinstance(context, Reviewer):
+        return handled
+    _generate_explanation_from_reviewer()
+    return (True, None)
 
 
 def open_browser_settings(browser: Browser) -> None:
@@ -2579,6 +2885,14 @@ def _add_editor_button(buttons: List[str], editor: Editor) -> List[str]:
         label="Generate images",
     )
     buttons.append(image_button)
+    explain_button = editor.addButton(
+        icon=None,
+        cmd="generate_vocab_explanation",
+        func=lambda ed=editor: generate_explanation_for_current_note(ed),
+        tip="Generate an AI explanation from word and definition (only if Explanation is empty)",
+        label="Generate explanation",
+    )
+    buttons.append(explain_button)
     return buttons
 
 
@@ -2599,3 +2913,4 @@ def _add_menu() -> None:
 _add_menu()
 gui_hooks.editor_did_init_buttons.append(_add_editor_button)
 gui_hooks.browser_menus_did_init.append(_add_browser_menu)
+gui_hooks.webview_did_receive_js_message.append(_on_webview_js_message)

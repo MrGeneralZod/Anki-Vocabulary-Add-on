@@ -1978,3 +1978,37 @@ body:is(.nightMode, .night_mode) .note-tag {
 .explanation-panel[hidden] {
   display: none !important;
 }
+
+.explain-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.explain-loader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  color: var(--col-text-muted, #6b7280);
+  font-size: 0.9rem;
+}
+
+.explain-loader[hidden] {
+  display: none !important;
+}
+
+.explain-loader-spinner {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: explain-spin 0.75s linear infinite;
+}
+
+@keyframes explain-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
