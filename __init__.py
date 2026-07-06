@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,14 +16,92 @@ from aqt import mw
 from aqt import gui_hooks
 from aqt.browser import Browser
 from aqt.editor import Editor
-from aqt.qt import QAction, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QMenu, Qt, QVBoxLayout, QWidget
+from aqt.qt import (
+    QAction,
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QKeyEvent,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QMessageBox,
+    QProgressBar,
+    Qt,
+    QVBoxLayout,
+    QWidget,
+)
 from aqt.operations import QueryOp
-from aqt.utils import askUser, showInfo, tooltip
+from aqt.utils import askUser, disable_help_button, showInfo, tooltip
 
 
 MENU_LABEL = "Enrich Vocabulary Fields"
 LAST_API_ERROR = ""
 LAST_IMAGE_GEN_ERROR = ""
+IMAGE_GEN_CANCELLED_MSG = "Cancelled by user."
+_IMAGE_GEN_CANCEL_CONFIRMED = False
+
+
+class ImageGenProgressDialog(QDialog):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        disable_help_button(self)
+        self._finished = False
+        self.setWindowTitle("Anki")
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setMinimumWidth(300)
+
+        layout = QVBoxLayout(self)
+        label = QLabel("Generating image...", self)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(label)
+
+        bar = QProgressBar(self)
+        bar.setRange(0, 0)
+        bar.setTextVisible(False)
+        bar.setStyleSheet("QProgressBar::chunk { width: 1px; }")
+        layout.addWidget(bar)
+
+    def mark_finished(self) -> None:
+        self._finished = True
+        self.accept()
+
+    def _confirm_cancel(self) -> bool:
+        return (
+            QMessageBox.question(
+                self,
+                "Anki",
+                "Image generation is still in progress.\n\nCancel anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            == QMessageBox.StandardButton.Yes
+        )
+
+    def closeEvent(self, evt: Any) -> None:
+        if self._finished:
+            evt.accept()
+            return
+        evt.ignore()
+        mw.progress.single_shot(0, self._prompt_cancel, requires_collection=False)
+
+    def _prompt_cancel(self) -> None:
+        if self._finished:
+            return
+        if self._confirm_cancel():
+            global _IMAGE_GEN_CANCEL_CONFIRMED
+            _IMAGE_GEN_CANCEL_CONFIRMED = True
+            self._finished = True
+            self.accept()
+
+    def keyPressEvent(self, evt: QKeyEvent) -> None:
+        if evt.key() == Qt.Key.Key_Escape and not self._finished:
+            self.close()
+            return
+        super().keyPressEvent(evt)
 DEFAULT_IMAGE_GENERATION_API_URL = "https://free-image-generation-api.lokiyan1996.workers.dev/"
 ENRICHED_CARD_FLAG = 7  # Purple flag (Ctrl+7 in Browser)
 DEFAULT_CONFIG = {
@@ -1321,6 +1400,28 @@ def _extract_from_cambridge(
     }
 
 
+def _persist_note_changes(note: Note) -> bool:
+    """Save note to the collection. Returns False for unsaved (new) notes."""
+    if not note.id:
+        return False
+    note.flush()
+    return True
+
+
+def _resolve_editor_note(editor: Editor) -> Optional[Note]:
+    if mw.col is None:
+        return None
+    note = editor.note
+    if note is None:
+        return None
+    if note.id:
+        try:
+            return mw.col.get_note(note.id)
+        except Exception:
+            pass
+    return note
+
+
 def _flag_note_cards_purple(note: Note) -> None:
     if mw.col is None:
         return
@@ -1620,6 +1721,15 @@ def _build_vocab_image_prompt(word: str, definition: str) -> str:
     )
 
 
+def _image_gen_cancel_confirmed() -> bool:
+    return _IMAGE_GEN_CANCEL_CONFIRMED
+
+
+def _reset_image_gen_cancel() -> None:
+    global _IMAGE_GEN_CANCEL_CONFIRMED
+    _IMAGE_GEN_CANCEL_CONFIRMED = False
+
+
 def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Optional[bytes], str]:
     global LAST_IMAGE_GEN_ERROR
     LAST_IMAGE_GEN_ERROR = ""
@@ -1649,11 +1759,45 @@ def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Opt
         headers=headers,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=180) as response:
+
+    result: Dict[str, Any] = {"data": None, "content_type": "", "http_error": None, "error": None}
+    response_holder: List[Any] = []
+
+    def do_request() -> None:
+        try:
+            response = urllib.request.urlopen(req, timeout=180)
+            response_holder.append(response)
             data = response.read()
             content_type = str(response.headers.get("Content-Type", "")).lower()
-    except urllib.error.HTTPError as exc:
+            result["data"] = data
+            result["content_type"] = content_type
+        except urllib.error.HTTPError as exc:
+            result["http_error"] = exc
+        except Exception as exc:
+            result["error"] = exc
+        finally:
+            for response in response_holder:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
+    thread = threading.Thread(target=do_request, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        if _image_gen_cancel_confirmed():
+            LAST_IMAGE_GEN_ERROR = IMAGE_GEN_CANCELLED_MSG
+            for response in response_holder:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            thread.join(timeout=2.0)
+            return None, ""
+        thread.join(timeout=0.25)
+
+    if result["http_error"] is not None:
+        exc = result["http_error"]
         detail = ""
         try:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
@@ -1661,9 +1805,15 @@ def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Opt
             pass
         LAST_IMAGE_GEN_ERROR = f"HTTP {exc.code}: {detail or exc.reason}"
         return None, ""
-    except Exception as exc:
-        LAST_IMAGE_GEN_ERROR = str(exc)
+    if result["error"] is not None:
+        if _image_gen_cancel_confirmed():
+            LAST_IMAGE_GEN_ERROR = IMAGE_GEN_CANCELLED_MSG
+            return None, ""
+        LAST_IMAGE_GEN_ERROR = str(result["error"])
         return None, ""
+
+    data = result["data"]
+    content_type = result["content_type"]
     if not data:
         LAST_IMAGE_GEN_ERROR = "Empty image response from API."
         return None, ""
@@ -2032,8 +2182,8 @@ def _enrich_note(
             changed = True
 
     if changed:
-        note.flush()
-        _flag_note_cards_purple(note)
+        if _persist_note_changes(note):
+            _flag_note_cards_purple(note)
         return "updated"
     return "skipped"
 
@@ -2141,16 +2291,10 @@ def enrich_current_browser_note(editor: Editor) -> None:
     except Exception:
         pass
 
-    working_note = editor.note
+    working_note = _resolve_editor_note(editor)
     if working_note is None:
         showInfo("Open a note in the editor first.")
         return
-    try:
-        db_note = mw.col.get_note(working_note.id)
-        if db_note is not None:
-            working_note = db_note
-    except Exception:
-        pass
 
     source_field = _auto_heal_source_field(cfg, working_note)
 
@@ -2235,7 +2379,10 @@ def enrich_current_browser_note(editor: Editor) -> None:
     )
     if result == "updated":
         _refresh_editor_after_note_change(editor, working_note)
-        tooltip("Current note updated.")
+        if working_note.id:
+            tooltip("Current note updated.")
+        else:
+            tooltip("Fields filled. Save or add the note to keep changes.")
     elif result == "skipped":
         showInfo("Nothing changed (fields already filled or no values found).")
     elif result == "missing_source":
@@ -2289,17 +2436,11 @@ def generate_image_for_current_note(editor: Editor) -> None:
         return
 
     cfg = _read_config()
-    working_note = editor.note
     try:
         editor.saveNow(lambda: None)
     except Exception:
         pass
-    try:
-        db_note = mw.col.get_note(working_note.id)
-        if db_note is not None:
-            working_note = db_note
-    except Exception:
-        pass
+    working_note = _resolve_editor_note(editor)
     if working_note is None:
         showInfo("Open a note in the editor first.")
         return
@@ -2336,13 +2477,25 @@ def generate_image_for_current_note(editor: Editor) -> None:
     token = cfg.get("api_keys", {}).get("image_generation", "")
     note_id = working_note.id
 
+    _reset_image_gen_cancel()
+    progress_dialog = ImageGenProgressDialog(parent)
+    progress_dialog.show()
+
     def op(_col: Any) -> Tuple[Optional[bytes], str]:
         return _request_generated_image(prompt, api_url, token)
 
+    def finish_progress() -> None:
+        if progress_dialog.isVisible():
+            progress_dialog.mark_finished()
+
     def on_success(result: Tuple[Optional[bytes], str]) -> None:
+        finish_progress()
         image_data, content_type = result
         if not image_data:
-            showInfo(f"Image generation failed.\n\n{LAST_IMAGE_GEN_ERROR or 'Unknown error.'}")
+            if LAST_IMAGE_GEN_ERROR == IMAGE_GEN_CANCELLED_MSG:
+                tooltip("Image generation cancelled.")
+            else:
+                showInfo(f"Image generation failed.\n\n{LAST_IMAGE_GEN_ERROR or 'Unknown error.'}")
             return
         if mw.col is None:
             return
@@ -2356,16 +2509,22 @@ def generate_image_for_current_note(editor: Editor) -> None:
             showInfo("Could not save the generated image to the media folder.")
             return
         note[image_field] = f'<img src="{html.escape(local_filename, quote=True)}">'
-        note.flush()
+        if not _persist_note_changes(note):
+            _refresh_editor_after_note_change(editor, note)
+            tooltip("Image saved to note fields. Save or add the note to keep changes.")
+            return
         _flag_note_cards_purple(note)
         _refresh_editor_after_note_change(editor, note)
         tooltip("Image generated and saved to the note.")
+
+    def on_failure(_exc: Exception) -> None:
+        finish_progress()
 
     QueryOp(
         parent=parent,
         op=op,
         success=on_success,
-    ).with_progress("Generating image...").without_collection().run_in_background()
+    ).failure(on_failure).without_collection().run_in_background()
 
 
 def open_browser_settings(browser: Browser) -> None:
