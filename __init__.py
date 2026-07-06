@@ -631,7 +631,28 @@ def _extract_from_merriam(payload: List[Dict[str, Any]], separator: str) -> Dict
     }
 
 
+def _choose_cambridge_pos_label(candidates: List[Tuple[int, str]]) -> str:
+    if not candidates:
+        return ""
+    labels = {text.lower(): text for _, text in candidates}
+    # Phrasal-verb entries also label the base verb ("phrasal verb with turn verb").
+    if "phrasal verb" in labels and "verb" in labels:
+        return labels["phrasal verb"]
+    return max(candidates, key=lambda x: x[0])[1]
+
+
 def _extract_cambridge_part_of_speech(block_html: str) -> str:
+    anc_match = re.search(
+        r'<span[^>]*class=["\'][^"\']*\banc-info-head\b[^"\']*["\'][^>]*>'
+        r'.*?<span[^>]*class=["\'][^"\']*\bpos\b[^"\']*\bdpos\b[^"\']*["\'][^>]*>(.*?)</span>',
+        block_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if anc_match:
+        text = _clean(html.unescape(re.sub(r"<[^>]+>", " ", anc_match.group(1))))
+        if text:
+            return text
+
     patterns = (
         r'<span[^>]*class=["\'][^"\']*\bposgram\b[^"\']*["\'][^>]*>(.*?)</span>',
         r'<span[^>]*class=["\'][^"\']*\bpos\b[^"\']*\bdpos\b[^"\']*["\'][^>]*>(.*?)</span>',
@@ -646,9 +667,7 @@ def _extract_cambridge_part_of_speech(block_html: str) -> str:
             text = _clean(html.unescape(re.sub(r"<[^>]+>", " ", raw)))
             if text:
                 candidates.append((m.start(), text))
-    if not candidates:
-        return ""
-    return max(candidates, key=lambda x: x[0])[1]
+    return _choose_cambridge_pos_label(candidates)
 
 
 def _build_cambridge_pos_timeline(html_text: str) -> List[Tuple[int, str]]:
@@ -663,7 +682,17 @@ def _build_cambridge_pos_timeline(html_text: str) -> List[Tuple[int, str]]:
             if text:
                 markers.append((m.start(), text))
     markers.sort(key=lambda item: item[0])
-    return markers
+    filtered: List[Tuple[int, str]] = []
+    for idx, label in markers:
+        if (
+            label.lower() == "verb"
+            and filtered
+            and filtered[-1][1].lower() == "phrasal verb"
+            and idx - filtered[-1][0] < 500
+        ):
+            continue
+        filtered.append((idx, label))
+    return filtered
 
 
 def _cambridge_part_of_speech_at(
