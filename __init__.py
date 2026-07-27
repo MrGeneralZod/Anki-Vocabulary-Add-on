@@ -30,7 +30,9 @@ from aqt.qt import (
     QMenu,
     QMessageBox,
     QProgressBar,
+    QPushButton,
     Qt,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -115,6 +117,12 @@ class ApiProgressDialog(QDialog):
 ImageGenProgressDialog = ApiProgressDialog
 
 DEFAULT_IMAGE_GENERATION_API_URL = "https://free-image-generation-api.lokiyan1996.workers.dev/"
+DEFAULT_IMAGE_GENERATION_PROMPT = (
+    'A clean, modern flat vector illustration representing the concept of "{word}" '
+    "({definition}). The style is minimalist with smooth lines, solid colors, and soft shading. "
+    "Simple composition, clear narrative, no text, no letters, no words. High quality, educational flashcard "
+    "style, vibrant yet harmonious color palette."
+)
 ENRICHED_CARD_FLAG = 7  # Purple flag (Ctrl+7 in Browser)
 DEFAULT_CONFIG = {
     "source_field": "Word",
@@ -145,6 +153,7 @@ DEFAULT_CONFIG = {
     "cambridge_usage_tags_enabled": True,
     "cambridge_usage_tag_map": {},
     "image_generation_api_url": DEFAULT_IMAGE_GENERATION_API_URL,
+    "image_generation_prompt": DEFAULT_IMAGE_GENERATION_PROMPT,
 }
 
 
@@ -1723,15 +1732,17 @@ def _image_generation_auth_header(token: str) -> str:
     return f"Bearer {cleaned}"
 
 
-def _build_vocab_image_prompt(word: str, definition: str) -> str:
+def _build_vocab_image_prompt(word: str, definition: str, template: Optional[str] = None) -> str:
     cleaned_word = _clean(word)
     cleaned_definition = _clean(definition)
-    return (
-        f'A clean, modern flat vector illustration representing the concept of "{cleaned_word}" '
-        f"({cleaned_definition}). The style is minimalist with smooth lines, solid colors, and soft shading. "
-        "Simple composition, clear narrative, no text, no letters, no words. High quality, educational flashcard "
-        "style, vibrant yet harmonious color palette."
-    )
+    prompt_template = _clean(template) or DEFAULT_IMAGE_GENERATION_PROMPT
+    try:
+        return prompt_template.format(word=cleaned_word, definition=cleaned_definition)
+    except (KeyError, IndexError, ValueError):
+        return DEFAULT_IMAGE_GENERATION_PROMPT.format(
+            word=cleaned_word,
+            definition=cleaned_definition,
+        )
 
 
 def _image_gen_cancel_confirmed() -> bool:
@@ -2130,6 +2141,22 @@ def _show_field_mapping_dialog(
     image_api_token.setText(cfg.get("api_keys", {}).get("image_generation", ""))
     form.addRow("Image API token:", image_api_token)
 
+    image_prompt_edit = QTextEdit(dialog)
+    image_prompt_edit.setPlainText(cfg.get("image_generation_prompt", DEFAULT_IMAGE_GENERATION_PROMPT))
+    image_prompt_edit.setMinimumHeight(100)
+
+    reset_image_prompt_btn = QPushButton("Reset", dialog)
+    reset_image_prompt_btn.clicked.connect(
+        lambda: image_prompt_edit.setPlainText(DEFAULT_IMAGE_GENERATION_PROMPT)
+    )
+
+    image_prompt_row = QWidget(dialog)
+    image_prompt_layout = QVBoxLayout(image_prompt_row)
+    image_prompt_layout.setContentsMargins(0, 0, 0, 0)
+    image_prompt_layout.addWidget(image_prompt_edit)
+    image_prompt_layout.addWidget(reset_image_prompt_btn, alignment=Qt.AlignmentFlag.AlignRight)
+    form.addRow("Image generation prompt:", image_prompt_row)
+
     def update_api_visibility() -> None:
         selected = data_source_combo.currentText()
         wordnik_key.setVisible(selected in ("wordnik", "custom"))
@@ -2164,6 +2191,7 @@ def _show_field_mapping_dialog(
         "overwrite_existing": overwrite_checkbox.isChecked(),
         "data_source": data_source_combo.currentText(),
         "image_generation_api_url": _clean(image_api_url.text()) or DEFAULT_IMAGE_GENERATION_API_URL,
+        "image_generation_prompt": image_prompt_edit.toPlainText().strip() or DEFAULT_IMAGE_GENERATION_PROMPT,
         "api_keys": {
             "wordnik": _clean(wordnik_key.text()),
             "merriam_webster": _clean(merriam_legacy_key.text()),
@@ -2182,6 +2210,7 @@ def _persist_field_choices(
     data_source: str,
     api_keys: Dict[str, str],
     image_generation_api_url: Optional[str] = None,
+    image_generation_prompt: Optional[str] = None,
 ) -> None:
     cfg["source_field"] = source_field
     cfg["field_map"] = field_map
@@ -2190,6 +2219,8 @@ def _persist_field_choices(
     cfg["api_keys"] = api_keys
     if image_generation_api_url:
         cfg["image_generation_api_url"] = image_generation_api_url
+    if image_generation_prompt is not None:
+        cfg["image_generation_prompt"] = image_generation_prompt or DEFAULT_IMAGE_GENERATION_PROMPT
     mw.addonManager.writeConfig(__name__, cfg)
 
 
@@ -2629,7 +2660,11 @@ def generate_image_for_current_note(editor: Editor) -> None:
         showInfo("Definition field is empty. Add a definition before generating an image.")
         return
 
-    prompt = _build_vocab_image_prompt(word, definition)
+    prompt = _build_vocab_image_prompt(
+        word,
+        definition,
+        cfg.get("image_generation_prompt"),
+    )
     api_url = cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)
     token = cfg.get("api_keys", {}).get("image_generation", "")
     note_id = working_note.id
@@ -2856,6 +2891,7 @@ def open_browser_settings(browser: Browser) -> None:
         choices["data_source"],
         choices["api_keys"],
         choices.get("image_generation_api_url"),
+        choices.get("image_generation_prompt"),
     )
     tooltip("Settings saved.")
 
