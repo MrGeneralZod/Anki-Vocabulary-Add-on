@@ -25,6 +25,7 @@
     "image_generation": ""
   },
   "image_generation_api_url": "https://free-image-generation-api.lokiyan1996.workers.dev/",
+  "image_generation_prompt": "A clean, modern flat vector illustration representing the concept of \"{word}\" ({definition}). The style is minimalist with smooth lines, solid colors, and soft shading. Simple composition, clear narrative, no text, no letters, no words. High quality, educational flashcard style, vibrant yet harmonious color palette.",
   "cambridge_usage_tags_enabled": true,
   "cambridge_usage_tag_map": {}
 }
