@@ -78,6 +78,14 @@ class ApiProgressDialog(QDialog):
     def mark_finished(self) -> None:
         self._finished = True
         self.accept()
+        self._reactivate_parent()
+
+    def _reactivate_parent(self) -> None:
+        parent = self.parent()
+        if parent is None:
+            return
+        from aqt.qt import QTimer
+        QTimer.singleShot(100, lambda: (parent.activateWindow(), parent.raise_()))
 
     def _confirm_cancel(self) -> bool:
         return (
