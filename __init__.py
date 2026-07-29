@@ -78,6 +78,14 @@ class ApiProgressDialog(QDialog):
     def mark_finished(self) -> None:
         self._finished = True
         self.accept()
+        self._reactivate_parent()
+
+    def _reactivate_parent(self) -> None:
+        parent = self.parent()
+        if parent is None:
+            return
+        from aqt.qt import QTimer
+        QTimer.singleShot(100, lambda: (parent.activateWindow(), parent.raise_()))
 
     def _confirm_cancel(self) -> bool:
         return (
@@ -1922,6 +1930,105 @@ def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Opt
     return data, content_type
 
 
+def _request_generated_image_v2(word: str, definition: str, api_url: str, token: str) -> Tuple[Optional[bytes], str]:
+    """Call /generate-image endpoint that uses server-side LLM to build the prompt."""
+    global LAST_IMAGE_GEN_ERROR
+    LAST_IMAGE_GEN_ERROR = ""
+    auth = _image_generation_auth_header(token)
+    body = json.dumps(
+        {
+            "word": _clean(word),
+            "definition": _clean(definition),
+        }
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "image/*,application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
+    }
+    if auth:
+        headers["Authorization"] = auth
+    req = urllib.request.Request(
+        api_url,
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+
+    result: Dict[str, Any] = {"data": None, "content_type": "", "http_error": None, "error": None}
+    response_holder: List[Any] = []
+
+    def do_request() -> None:
+        try:
+            response = urllib.request.urlopen(req, timeout=180)
+            response_holder.append(response)
+            data = response.read()
+            content_type = str(response.headers.get("Content-Type", "")).lower()
+            result["data"] = data
+            result["content_type"] = content_type
+        except urllib.error.HTTPError as exc:
+            result["http_error"] = exc
+        except Exception as exc:
+            result["error"] = exc
+        finally:
+            for response in response_holder:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
+    thread = threading.Thread(target=do_request, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        if _image_gen_cancel_confirmed():
+            LAST_IMAGE_GEN_ERROR = IMAGE_GEN_CANCELLED_MSG
+            for response in response_holder:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            thread.join(timeout=2.0)
+            return None, ""
+        thread.join(timeout=0.25)
+
+    if result["http_error"] is not None:
+        exc = result["http_error"]
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        LAST_IMAGE_GEN_ERROR = f"HTTP {exc.code}: {detail or exc.reason}"
+        return None, ""
+    if result["error"] is not None:
+        if _image_gen_cancel_confirmed():
+            LAST_IMAGE_GEN_ERROR = IMAGE_GEN_CANCELLED_MSG
+            return None, ""
+        LAST_IMAGE_GEN_ERROR = str(result["error"])
+        return None, ""
+
+    data = result["data"]
+    content_type = result["content_type"]
+    if not data:
+        LAST_IMAGE_GEN_ERROR = "Empty image response from API."
+        return None, ""
+    if "json" in content_type or (data[:1] == b"{" and b"error" in data[:200].lower()):
+        LAST_IMAGE_GEN_ERROR = data.decode("utf-8", errors="replace")[:300]
+        return None, ""
+    return data, content_type
+
+
+def _generate_image_api_url(cfg: Dict[str, Any]) -> str:
+    base = _clean(cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)) or DEFAULT_IMAGE_GENERATION_API_URL
+    if not base.endswith("/"):
+        base += "/"
+    return base + "generate-image"
+
+
 def _explain_api_url(cfg: Dict[str, Any]) -> str:
     base = _clean(cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)) or DEFAULT_IMAGE_GENERATION_API_URL
     if not base.endswith("/"):
@@ -2794,6 +2901,106 @@ def generate_image_for_current_note(editor: Editor) -> None:
     ).failure(on_failure).without_collection().run_in_background()
 
 
+def generate_image_v2_for_current_note(editor: Editor) -> None:
+    """Generate image via /generate-image endpoint (server-side LLM builds the prompt)."""
+    if mw.col is None:
+        return
+    parent = _editor_dialog_parent(editor)
+    if editor.note is None:
+        showInfo("Open a note in the editor first.")
+        return
+
+    cfg = _read_config()
+    try:
+        editor.saveNow(lambda: None)
+    except Exception:
+        pass
+    working_note = _resolve_editor_note(editor)
+    if working_note is None:
+        showInfo("Open a note in the editor first.")
+        return
+
+    source_field = _resolve_note_field_name(
+        working_note,
+        _auto_heal_source_field(cfg, working_note),
+    )
+    definition_field = _resolve_note_field_name(
+        working_note,
+        cfg.get("field_map", {}).get("definition", "Definition"),
+    )
+    image_field = _resolve_note_field_name(working_note, cfg.get("field_map", {}).get("image", "Image"))
+
+    if not image_field:
+        showInfo("Image field is not configured. Open Browse -> losev -> Settings.")
+        return
+
+    word = _plain_text(working_note[source_field]) if source_field and source_field in working_note else ""
+    definition = (
+        _plain_text(working_note[definition_field])
+        if definition_field and definition_field in working_note
+        else ""
+    )
+    if not word:
+        showInfo("Word field is empty. Fill the source word before generating an image.")
+        return
+    if not definition:
+        showInfo("Definition field is empty. Add a definition before generating an image.")
+        return
+
+    api_url = _generate_image_api_url(cfg)
+    token = cfg.get("api_keys", {}).get("image_generation", "")
+    note_id = working_note.id
+
+    _reset_image_gen_cancel()
+    progress_dialog = ApiProgressDialog("Generating image (AI prompt)...", parent=parent)
+    progress_dialog.show()
+
+    def op(_col: Any) -> Tuple[Optional[bytes], str]:
+        return _request_generated_image_v2(word, definition, api_url, token)
+
+    def finish_progress() -> None:
+        if progress_dialog.isVisible():
+            progress_dialog.mark_finished()
+
+    def on_success(result: Tuple[Optional[bytes], str]) -> None:
+        finish_progress()
+        image_data, content_type = result
+        if not image_data:
+            if LAST_IMAGE_GEN_ERROR == IMAGE_GEN_CANCELLED_MSG:
+                tooltip("Image generation cancelled.")
+            else:
+                showInfo(f"Image generation failed.\n\n{LAST_IMAGE_GEN_ERROR or 'Unknown error.'}")
+            return
+        if mw.col is None:
+            return
+        try:
+            note = mw.col.get_note(note_id)
+        except Exception:
+            showInfo("Note no longer available.")
+            return
+        local_filename = _save_image_bytes_to_media(image_data, word, "generated", content_type)
+        if not local_filename:
+            showInfo("Could not save the generated image to the media folder.")
+            return
+        note[image_field] = f'<img src="{html.escape(local_filename, quote=True)}">'
+        if not _persist_note_changes(note):
+            _refresh_editor_after_note_change(editor, note)
+            tooltip("Image saved to note fields. Save or add the note to keep changes.")
+            return
+        _flag_note_cards_purple(note)
+        _refresh_editor_after_note_change(editor, note)
+        tooltip("Image generated (AI prompt) and saved to the note.")
+
+    def on_failure(_exc: Exception) -> None:
+        finish_progress()
+
+    QueryOp(
+        parent=parent,
+        op=op,
+        success=on_success,
+    ).failure(on_failure).without_collection().run_in_background()
+
+
 def generate_explanation_for_current_note(editor: Editor) -> None:
     if mw.col is None:
         return
@@ -2996,6 +3203,14 @@ def _add_editor_button(buttons: List[str], editor: Editor) -> List[str]:
         label="Generate images",
     )
     buttons.append(image_button)
+    image_v2_button = editor.addButton(
+        icon=None,
+        cmd="generate_vocab_image_v2",
+        func=lambda ed=editor: generate_image_v2_for_current_note(ed),
+        tip="Generate image with AI-crafted prompt (server-side LLM builds a better description)",
+        label="Generate image (AI)",
+    )
+    buttons.append(image_v2_button)
     explain_button = editor.addButton(
         icon=None,
         cmd="generate_vocab_explanation",
