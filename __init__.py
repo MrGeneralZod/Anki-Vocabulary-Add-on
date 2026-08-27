@@ -20,10 +20,13 @@ from aqt.qt import (
     QAction,
     QApplication,
     QCheckBox,
+    QColor,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
+    QHeaderView,
     QKeyEvent,
     QLabel,
     QLineEdit,
@@ -31,6 +34,9 @@ from aqt.qt import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QPixmap,
+    QTableWidget,
+    QTableWidgetItem,
     Qt,
     QTextEdit,
     QVBoxLayout,
@@ -123,6 +129,365 @@ class ApiProgressDialog(QDialog):
 
 
 ImageGenProgressDialog = ApiProgressDialog
+
+_BULK_IMAGE_COL_WORD = 0
+_BULK_IMAGE_COL_GENERATE = 1
+_BULK_IMAGE_COL_ERROR = 2
+_BULK_IMAGE_COL_IMAGE = 3
+_BULK_IMAGE_THUMB_SIZE = 64
+_BULK_IMAGE_ROW_HEIGHT = 72
+_BULK_IMAGE_ERROR_PREVIEW_LEN = 300
+
+
+def _bulk_extract_img_src(image_html: str) -> str:
+    match = re.search(r'<img[^>]*\bsrc=["\']([^"\']+)["\']', image_html or "", flags=re.IGNORECASE)
+    if not match:
+        return ""
+    return _clean(html.unescape(match.group(1)))
+
+
+def _bulk_media_image_path(src: str) -> Optional[str]:
+    if not src or mw.col is None:
+        return None
+    if src.startswith(("http://", "https://", "data:")):
+        return None
+    filename = os.path.basename(urllib.parse.unquote(src))
+    if not filename:
+        return None
+    path = os.path.join(mw.col.media.dir(), filename)
+    return path if os.path.exists(path) else None
+
+
+class BulkImageGenerationDialog(QDialog):
+    def __init__(
+        self,
+        rows: List[Dict[str, Any]],
+        cfg: Dict[str, Any],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        disable_help_button(self)
+        self._rows = rows
+        self._running = False
+        self._close_when_idle = False
+        self._pending_indices: List[int] = []
+        self._current_idx = -1
+        self._api_url = cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)
+        self._prompt_template = cfg.get("image_generation_prompt")
+        self._token = cfg.get("api_keys", {}).get("image_generation", "")
+
+        self.setWindowTitle("Generate images (bulk)")
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setMinimumSize(840, 460)
+
+        layout = QVBoxLayout(self)
+
+        self._table = QTableWidget(len(rows), 4, self)
+        self._table.setHorizontalHeaderLabels(["Word", "Generate images", "Error", "Image"])
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(_BULK_IMAGE_ROW_HEIGHT)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(_BULK_IMAGE_COL_WORD, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(_BULK_IMAGE_COL_GENERATE, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(_BULK_IMAGE_COL_ERROR, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(_BULK_IMAGE_COL_IMAGE, QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(_BULK_IMAGE_COL_IMAGE, _BULK_IMAGE_ROW_HEIGHT + 16)
+
+        for row_idx, row in enumerate(rows):
+            self._table.setItem(row_idx, _BULK_IMAGE_COL_WORD, self._make_item(row.get("word", "")))
+            self._table.setItem(
+                row_idx,
+                _BULK_IMAGE_COL_GENERATE,
+                self._make_item(row.get("initial_status", "Pending")),
+            )
+            self._table.setItem(row_idx, _BULK_IMAGE_COL_ERROR, self._make_item(""))
+            self._set_image_preview(row_idx, image_html=row.get("image_html", ""))
+
+        layout.addWidget(self._table)
+
+        btn_row = QWidget(self)
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        self._gen_btn = QPushButton("Generate images", self)
+        self._retry_btn = QPushButton("Retry selected", self)
+        self._gen_btn.clicked.connect(self._run_generate)
+        self._retry_btn.clicked.connect(self._retry_selected)
+        btn_layout.addWidget(self._gen_btn)
+        btn_layout.addWidget(self._retry_btn)
+        btn_layout.addStretch()
+        layout.addWidget(btn_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _alive(self) -> bool:
+        try:
+            from aqt.qt import sip
+
+            if sip.isdeleted(self):
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _make_item(self, text: str, kind: str = "") -> QTableWidgetItem:
+        item = QTableWidgetItem(text)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        if kind == "success":
+            item.setBackground(QColor("#c8e6c9"))
+            item.setForeground(QColor("#1b5e20"))
+        elif kind == "error":
+            item.setBackground(QColor("#ffcdd2"))
+            item.setForeground(QColor("#b71c1c"))
+        return item
+
+    def _set_status(self, row: int, text: str, kind: str = "") -> None:
+        self._table.setItem(row, _BULK_IMAGE_COL_GENERATE, self._make_item(text, kind))
+
+    def _set_error(self, row: int, text: str) -> None:
+        display = text
+        if len(display) > _BULK_IMAGE_ERROR_PREVIEW_LEN:
+            display = display[:_BULK_IMAGE_ERROR_PREVIEW_LEN] + "..."
+        item = self._make_item(display)
+        if text:
+            item.setToolTip(text)
+            item.setForeground(QColor("#b71c1c"))
+        self._table.setItem(row, _BULK_IMAGE_COL_ERROR, item)
+
+    def _set_image_preview(self, row: int, image_html: str = "", placeholder: str = "") -> None:
+        label = QLabel(self._table)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pixmap = None
+        src = _bulk_extract_img_src(image_html)
+        path = _bulk_media_image_path(src) if src else None
+        if path:
+            pixmap = QPixmap(path)
+        if pixmap is not None and not pixmap.isNull():
+            label.setPixmap(
+                pixmap.scaled(
+                    _BULK_IMAGE_THUMB_SIZE,
+                    _BULK_IMAGE_THUMB_SIZE,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        else:
+            label.setText(placeholder)
+        self._table.setCellWidget(row, _BULK_IMAGE_COL_IMAGE, label)
+
+    def _set_buttons_enabled(self, enabled: bool) -> None:
+        self._gen_btn.setEnabled(enabled)
+        self._retry_btn.setEnabled(enabled)
+
+    def _finish_run(self) -> None:
+        self._running = False
+        self._set_buttons_enabled(True)
+        if self._close_when_idle:
+            self._close_when_idle = False
+            super().reject()
+
+    def _start_rows(self, indices: List[int]) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._close_when_idle = False
+        _reset_image_gen_cancel()
+        self._pending_indices = list(indices)
+        self._set_buttons_enabled(False)
+        self._process_next()
+
+    def _run_generate(self) -> None:
+        self._start_rows([i for i, row in enumerate(self._rows) if not row.get("skip")])
+
+    def _retry_selected(self) -> None:
+        if self._running:
+            return
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._rows):
+            showInfo("Select a word in the table first.")
+            return
+        if self._rows[row].get("skip"):
+            showInfo("This note has no word.")
+            return
+        self._start_rows([row])
+
+    def _refresh_browser_editor(self, note: Note) -> None:
+        parent = self.parent()
+        editor = getattr(parent, "editor", None)
+        if editor is None or editor.note is None:
+            return
+        if editor.note.id == note.id:
+            _refresh_editor_after_note_change(editor, note)
+
+    def _process_next(self) -> None:
+        if not self._alive():
+            return
+        while self._pending_indices:
+            idx = self._pending_indices.pop(0)
+            self._current_idx = idx
+            row = self._rows[idx]
+            self._set_status(idx, "Generating...")
+            self._set_error(idx, "")
+
+            if not row.get("definition"):
+                self._set_status(idx, "No definition", "error")
+                self._set_error(idx, "Definition field is empty.")
+                continue
+            if not row.get("image_field"):
+                self._set_status(idx, "Failed", "error")
+                self._set_error(idx, "Image field is not configured.")
+                continue
+
+            prompt = _build_vocab_image_prompt(
+                row.get("word", ""),
+                row.get("definition", ""),
+                self._prompt_template,
+            )
+            api_url = self._api_url
+            token = self._token
+
+            def op(_col: Any, p=prompt, url=api_url, tok=token) -> Tuple[Optional[bytes], str]:
+                return _request_generated_image(p, url, tok)
+
+            def on_success(result: Tuple[Optional[bytes], str], row_idx=idx) -> None:
+                self._on_row_result(row_idx, result, None)
+
+            def on_failure(exc: Exception, row_idx=idx) -> None:
+                self._on_row_result(row_idx, None, exc)
+
+            QueryOp(
+                parent=self,
+                op=op,
+                success=on_success,
+            ).failure(on_failure).without_collection().run_in_background()
+            return
+        self._finish_run()
+
+    def _on_row_result(
+        self,
+        idx: int,
+        result: Optional[Tuple[Optional[bytes], str]],
+        exc: Optional[Exception],
+    ) -> None:
+        if not self._alive():
+            return
+
+        cancelled = _image_gen_cancel_confirmed() or LAST_IMAGE_GEN_ERROR == IMAGE_GEN_CANCELLED_MSG
+        if cancelled:
+            self._set_status(idx, "Cancelled", "error")
+            self._set_error(idx, LAST_IMAGE_GEN_ERROR or IMAGE_GEN_CANCELLED_MSG)
+            self._pending_indices.clear()
+            self._process_next()
+            return
+
+        if exc is not None:
+            self._set_status(idx, "Failed", "error")
+            self._set_error(idx, str(exc) or "Unknown error.")
+            self._process_next()
+            return
+
+        image_data, content_type = result if result else (None, "")
+        if not image_data:
+            self._set_status(idx, "Failed", "error")
+            self._set_error(idx, LAST_IMAGE_GEN_ERROR or "Unknown error.")
+            self._process_next()
+            return
+
+        if mw.col is None:
+            self._set_status(idx, "Failed", "error")
+            self._set_error(idx, "Collection is not available.")
+            self._process_next()
+            return
+
+        row = self._rows[idx]
+        try:
+            note = mw.col.get_note(row["note_id"])
+        except Exception:
+            self._set_status(idx, "Failed", "error")
+            self._set_error(idx, "Note no longer available.")
+            self._process_next()
+            return
+
+        local_filename = _save_image_bytes_to_media(
+            image_data,
+            row.get("word", ""),
+            "generated",
+            content_type,
+        )
+        if not local_filename:
+            self._set_status(idx, "Failed", "error")
+            self._set_error(idx, "Could not save the generated image to the media folder.")
+            self._process_next()
+            return
+
+        image_field = row.get("image_field")
+        if not image_field or image_field not in note:
+            self._set_status(idx, "Failed", "error")
+            self._set_error(idx, "Image field is not configured.")
+            self._process_next()
+            return
+
+        image_html = f'<img src="{html.escape(local_filename, quote=True)}">'
+        note[image_field] = image_html
+        if not _persist_note_changes(note):
+            self._set_status(idx, "Failed", "error")
+            self._set_error(idx, "Could not save the note.")
+            self._process_next()
+            return
+
+        _flag_note_cards_purple(note)
+        self._refresh_browser_editor(note)
+        row["image_html"] = image_html
+        self._set_status(idx, "Done", "success")
+        self._set_error(idx, "")
+        self._set_image_preview(idx, image_html=image_html)
+        self._process_next()
+
+    def _confirm_cancel(self) -> bool:
+        return (
+            QMessageBox.question(
+                self,
+                "Anki",
+                "Generation is still in progress.\n\nCancel anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            == QMessageBox.StandardButton.Yes
+        )
+
+    def _prompt_cancel(self) -> None:
+        if not self._running:
+            return
+        if not self._confirm_cancel():
+            return
+        global _IMAGE_GEN_CANCEL_CONFIRMED
+        _IMAGE_GEN_CANCEL_CONFIRMED = True
+        self._pending_indices.clear()
+        self._close_when_idle = True
+
+    def closeEvent(self, evt: Any) -> None:
+        if self._running:
+            evt.ignore()
+            self._prompt_cancel()
+            return
+        super().closeEvent(evt)
+
+    def reject(self) -> None:
+        if self._running:
+            self._prompt_cancel()
+            return
+        super().reject()
+
+    def keyPressEvent(self, evt: QKeyEvent) -> None:
+        if evt.key() == Qt.Key.Key_Escape:
+            self.reject()
+            return
+        super().keyPressEvent(evt)
+
 
 DEFAULT_IMAGE_GENERATION_API_URL = "https://free-image-generation-api.lokiyan1996.workers.dev/"
 DEFAULT_IMAGE_GENERATION_PROMPT = (
@@ -3222,11 +3587,80 @@ def _add_editor_button(buttons: List[str], editor: Editor) -> List[str]:
     return buttons
 
 
+def _collect_bulk_image_rows(note_ids: List[int], cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    if mw.col is None:
+        return rows
+
+    field_map = cfg.get("field_map", {})
+    for nid in note_ids:
+        try:
+            note = mw.col.get_note(nid)
+        except Exception:
+            continue
+
+        source_field = _resolve_note_field_name(note, _auto_heal_source_field(cfg, note))
+        definition_field = _resolve_note_field_name(note, field_map.get("definition", "Definition"))
+        image_field = _resolve_note_field_name(note, field_map.get("image", "Image"))
+        word = _plain_text(note[source_field]) if source_field and source_field in note else ""
+        definition = (
+            _plain_text(note[definition_field])
+            if definition_field and definition_field in note
+            else ""
+        )
+        image_html = note[image_field] if image_field and image_field in note else ""
+        has_image = bool(_clean(html.unescape(image_html)))
+
+        skip = not word
+        if skip:
+            initial_status = "No word"
+        elif has_image:
+            initial_status = "Has image"
+        else:
+            initial_status = "Pending"
+
+        rows.append(
+            {
+                "note_id": nid,
+                "word": word,
+                "definition": definition,
+                "image_field": image_field,
+                "skip": skip,
+                "image_html": image_html,
+                "initial_status": initial_status,
+            }
+        )
+    return rows
+
+
+def open_bulk_image_generation(browser: Browser) -> None:
+    if mw.col is None:
+        return
+    note_ids = browser.selectedNotes()
+    if not note_ids:
+        showInfo("Select at least one note in the Browser.")
+        return
+
+    cfg = _read_config()
+    rows = _collect_bulk_image_rows(note_ids, cfg)
+    if not rows:
+        showInfo("Could not read the selected notes.")
+        return
+
+    dialog = BulkImageGenerationDialog(rows, cfg, parent=browser)
+    dialog.exec()
+
+
 def _add_browser_menu(browser: Browser) -> None:
     losev_menu = QMenu("losev", browser.form.menubar)
     settings_action = QAction("Settings", losev_menu)
     settings_action.triggered.connect(lambda _checked=False, b=browser: open_browser_settings(b))
     losev_menu.addAction(settings_action)
+    bulk_image_action = QAction("Generate images (bulk)", losev_menu)
+    bulk_image_action.triggered.connect(
+        lambda _checked=False, b=browser: open_bulk_image_generation(b)
+    )
+    losev_menu.addAction(bulk_image_action)
     browser.form.menubar.addMenu(losev_menu)
 
 
