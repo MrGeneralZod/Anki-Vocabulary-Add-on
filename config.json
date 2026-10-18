@@ -1,0 +1,31 @@
+{
+  "source_field": "Word",
+  "field_map": {
+    "ipa": "IPA",
+    "definition": "Definition",
+    "examples": "Examples",
+    "synonyms": "Synonyms",
+    "antonyms": "Antonyms",
+    "image": "Image",
+    "audio": "Audio",
+    "part_of_speech": "Part of speech",
+    "cefr": "CEFR",
+    "explanation": "Explanation"
+  },
+  "separator": "; ",
+  "overwrite_existing": false,
+  "max_definitions": 3,
+  "max_examples": 3,
+  "data_source": "custom",
+  "api_keys": {
+    "wordnik": "",
+    "merriam_webster": "",
+    "merriam_collegiate": "",
+    "merriam_sd3": "",
+    "image_generation": ""
+  },
+  "image_generation_api_url": "https://free-image-generation-api.lokiyan1996.workers.dev/",
+  "image_generation_prompt": "A clean, modern flat vector illustration representing the concept of \"{word}\" ({definition}). The style is minimalist with smooth lines, solid colors, and soft shading. Simple composition, clear narrative, no text, no letters, no words. High quality, educational flashcard style, vibrant yet harmonious color palette.",
+  "cambridge_usage_tags_enabled": true,
+  "cambridge_usage_tag_map": {}
+}

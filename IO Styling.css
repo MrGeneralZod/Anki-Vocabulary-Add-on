@@ -1,0 +1,198 @@
+/* Image Occlusion Enhanced — required positioning (do not remove) */
+#io-overlay,
+.io-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  z-index: 3;
+}
+
+#io-original {
+  position: relative;
+  top: 0;
+  width: 100%;
+  z-index: 2;
+  visibility: hidden;
+}
+
+#io-wrapper {
+  position: relative;
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+#io-front-masks,
+#io-back-masks {
+  position: static;
+  width: 100%;
+}
+
+#io-wrapper-review {
+  position: relative;
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+#io-overlay-review {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  z-index: 3;
+}
+
+#io-original-review {
+  position: relative;
+  top: 0;
+  width: 100%;
+  z-index: 2;
+  visibility: hidden;
+}
+
+/* Answer-side diagram uses classes to avoid duplicate #io-overlay ids */
+.io-review-image .io-wrapper {
+  position: relative;
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.io-review-image .io-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  z-index: 3;
+}
+
+.io-review-image .io-original {
+  position: relative;
+  top: 0;
+  width: 100%;
+  z-index: 2;
+  visibility: hidden;
+}
+
+.io-review-image .io-header {
+  font-size: 1.1em;
+  margin-bottom: 0.2em;
+}
+
+.io-review-image .io-footer {
+  max-width: 80%;
+  margin-left: auto;
+  margin-right: auto;
+  margin-top: 0.8em;
+  font-style: italic;
+}
+
+/* Diagram on answer side (MemRise hides .card-content.front when flipped) */
+.io-review-image {
+  display: none;
+  margin-top: 1rem;
+}
+
+.backside .io-review-image {
+  display: block;
+}
+
+.backside .io-review-image .io-original {
+  visibility: visible;
+}
+
+.io-review-image.io-masks-hidden .io-overlay,
+.io-review-image.io-masks-hidden #io-overlay {
+  display: none !important;
+}
+
+.io-review-image .io-original img,
+.io-typing-image #io-original img {
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+
+#io-header {
+  font-size: 1.1em;
+  margin-bottom: 0.2em;
+}
+
+#io-footer {
+  max-width: 80%;
+  margin-left: auto;
+  margin-right: auto;
+  margin-top: 0.8em;
+  font-style: italic;
+}
+
+#io-extra-wrapper {
+  width: 80%;
+  margin-left: auto;
+  margin-right: auto;
+  margin-top: 0.5em;
+}
+
+#io-extra {
+  text-align: center;
+  display: inline-block;
+}
+
+.io-extra-entry {
+  margin-top: 0.8em;
+  font-size: 0.9em;
+  text-align: left;
+}
+
+.io-field-descr {
+  margin-bottom: 0.2em;
+  font-weight: bold;
+  font-size: 1em;
+}
+
+#io-revl-btn {
+  font-size: 0.85rem;
+  margin-top: 0.75rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 0.35rem;
+  border: 1px solid var(--col-input-border, #ccc);
+  background: var(--col-button-bg, #f5f5f5);
+  color: var(--col-button-text, #222);
+  cursor: pointer;
+}
+
+/* Typed IO + MemRise integration */
+.io-typing-image {
+  margin: 0 auto 1rem;
+  max-width: 100%;
+}
+
+.io-typing-card .io-prompt {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+/* Front: masks are visual only — answer is typed below */
+.card-content.front.io-typing-card #io-overlay,
+.card-content.front.io-typing-card .io-overlay {
+  pointer-events: none;
+  cursor: default;
+}
+
+/* Hide duplicate Remarks block from default IO back layout */
+.io-back-extras {
+  text-align: center;
+  margin-bottom: 1rem;
+}
+
+.mobile #io-extra-wrapper {
+  width: 95%;
+}
+
+.mobile #io-revl-btn {
+  font-size: 0.95rem;
+}
+
+/* --- Paste your full Styles.css below this line in Anki --- */
