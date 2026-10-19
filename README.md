@@ -40,3 +40,4 @@ Pick the source in **Browse -> losev -> Settings**.
 
 - Cambridge source may occasionally break if Cambridge changes page markup.
 - By default, existing target fields are not overwritten.
+- On **Enrich Note**, the definition dialog includes a **Generate examples via API** checkbox. When checked, examples are requested from `{image_generation_api_url}/examples` instead of the dictionary (uses the same image-generation API key).
