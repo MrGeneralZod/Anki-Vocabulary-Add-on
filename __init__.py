@@ -50,6 +50,7 @@ MENU_LABEL = "Enrich Vocabulary Fields"
 LAST_API_ERROR = ""
 LAST_IMAGE_GEN_ERROR = ""
 LAST_EXPLAIN_ERROR = ""
+LAST_EXAMPLES_ERROR = ""
 IMAGE_GEN_CANCELLED_MSG = "Cancelled by user."
 _EXPLAIN_PYCMD = "vocabEnrich:generateExplanation"
 _IMAGE_GEN_CANCEL_CONFIRMED = False
@@ -2401,6 +2402,13 @@ def _explain_api_url(cfg: Dict[str, Any]) -> str:
     return base + "explain"
 
 
+def _examples_api_url(cfg: Dict[str, Any]) -> str:
+    base = _clean(cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)) or DEFAULT_IMAGE_GENERATION_API_URL
+    if not base.endswith("/"):
+        base += "/"
+    return base + "examples"
+
+
 def _note_explanation_field(note: Note, cfg: Dict[str, Any]) -> Optional[str]:
     return _resolve_note_field_name(note, cfg.get("field_map", {}).get("explanation", "Explanation"))
 
@@ -2478,6 +2486,77 @@ def _request_word_explanation(word: str, definition: str, api_url: str, token: s
         LAST_EXPLAIN_ERROR = "Empty explanation in API response."
         return None
     return explanation
+
+
+def _request_word_examples(
+    word: str,
+    definition: str,
+    count: int,
+    api_url: str,
+    token: str,
+) -> Optional[List[str]]:
+    global LAST_EXAMPLES_ERROR
+    LAST_EXAMPLES_ERROR = ""
+    cleaned_word = _clean(word)[:100]
+    cleaned_definition = _clean(definition)[:2000]
+    if not cleaned_word:
+        LAST_EXAMPLES_ERROR = "Word is empty."
+        return None
+    if not cleaned_definition:
+        LAST_EXAMPLES_ERROR = "Definition is empty."
+        return None
+    safe_count = max(1, min(10, int(count) if count else 3))
+    auth = _image_generation_auth_header(token)
+    body = json.dumps(
+        {
+            "word": cleaned_word,
+            "definition": cleaned_definition,
+            "count": safe_count,
+        }
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
+    }
+    if auth:
+        headers["Authorization"] = auth
+    req = urllib.request.Request(
+        api_url,
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        LAST_EXAMPLES_ERROR = f"HTTP {exc.code}: {detail or exc.reason}"
+        return None
+    except Exception as exc:
+        LAST_EXAMPLES_ERROR = str(exc)
+        return None
+
+    raw_examples = payload.get("examples")
+    if not isinstance(raw_examples, list):
+        LAST_EXAMPLES_ERROR = "Missing examples list in API response."
+        return None
+    examples = [_clean(str(item)) for item in raw_examples if _clean(str(item))]
+    if len(examples) != safe_count:
+        LAST_EXAMPLES_ERROR = (
+            f"API returned {len(examples)} examples, expected {safe_count}."
+        )
+        return None
+    return examples
 
 
 def _generate_explanation_for_note(note: Note, cfg: Dict[str, Any]) -> str:
@@ -2566,11 +2645,9 @@ def _extract_definition_candidates(payload: List[Dict[str, Any]]) -> List[Dict[s
 def _choose_definition_dialog(
     choices: List[Dict[str, str]],
     parent: Optional[QWidget] = None,
-) -> Optional[Dict[str, str]]:
+) -> Optional[Tuple[Dict[str, str], bool]]:
     if not choices:
         return None
-    if len(choices) == 1:
-        return choices[0]
 
     dialog = QDialog(parent or mw)
     dialog.setWindowTitle("Choose definition")
@@ -2582,6 +2659,10 @@ def _choose_definition_dialog(
         combo.addItem(_definition_choice_label(choice))
     layout.addWidget(combo)
 
+    examples_checkbox = QCheckBox("Generate examples via API", dialog)
+    examples_checkbox.setChecked(False)
+    layout.addWidget(examples_checkbox)
+
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog)
     buttons.accepted.connect(dialog.accept)
     buttons.rejected.connect(dialog.reject)
@@ -2592,7 +2673,7 @@ def _choose_definition_dialog(
     idx = combo.currentIndex()
     if idx < 0 or idx >= len(choices):
         return None
-    return choices[idx]
+    return choices[idx], bool(examples_checkbox.isChecked())
 
 
 def _set_field(note: Any, field_name: str, value: str, overwrite_existing: bool) -> bool:
@@ -2779,7 +2860,9 @@ def _enrich_note(
     selected_definition: Optional[str] = None,
     selected_part_of_speech: Optional[str] = None,
     selected_meaning_type: Optional[str] = None,
+    use_api_examples: bool = False,
 ) -> str:
+    global LAST_EXAMPLES_ERROR
     resolved_source_field = _resolve_note_field_name(note, source_field)
     if not resolved_source_field:
         return "missing_source"
@@ -2878,6 +2961,24 @@ def _enrich_note(
             details["audio"] = _localize_cambridge_audio(details.get("audio", ""), word)
         if not any(details.values()):
             return "no_api_result"
+
+    examples_api_failed = False
+    if use_api_examples:
+        LAST_EXAMPLES_ERROR = ""
+        definition_for_api = _clean(selected_definition or "") or _plain_text(details.get("definition", ""))
+        api_examples = _request_word_examples(
+            word,
+            definition_for_api,
+            int(cfg["max_examples"]),
+            _examples_api_url(cfg),
+            cfg.get("api_keys", {}).get("image_generation", ""),
+        )
+        if api_examples:
+            details["examples"] = _render_examples_html(api_examples, word)
+        else:
+            details["examples"] = ""
+            examples_api_failed = True
+
     changed = False
     max_examples = int(cfg["max_examples"])
     for key, target_field in cfg["field_map"].items():
@@ -2890,6 +2991,11 @@ def _enrich_note(
         if key == "examples":
             resolved_examples_field = _resolve_note_field_name(note, target_field)
             if not resolved_examples_field:
+                continue
+            if use_api_examples:
+                if note[resolved_examples_field] != value:
+                    note[resolved_examples_field] = value
+                    changed = True
                 continue
             existing_examples = _parse_examples_list(note[resolved_examples_field])
             fetched_examples = _parse_examples_list(value)
@@ -2919,7 +3025,11 @@ def _enrich_note(
     if changed:
         if _persist_note_changes(note):
             _flag_note_cards_purple(note)
+        if examples_api_failed:
+            return "updated_examples_api_failed"
         return "updated"
+    if examples_api_failed:
+        return "examples_api_failed"
     return "skipped"
 
 
@@ -3069,6 +3179,7 @@ def enrich_current_browser_note(editor: Editor) -> None:
     selected_definition = None
     selected_part_of_speech = None
     selected_meaning_type = None
+    use_api_examples = False
     payload = None
     if cfg.get("data_source", "custom") in ("dictionaryapi", "custom"):
         payload = _request_dictionary_data(word)
@@ -3078,8 +3189,9 @@ def enrich_current_browser_note(editor: Editor) -> None:
             if choices and not selected:
                 return
             if selected:
-                selected_definition = selected.get("definition", "")
-                selected_part_of_speech = selected.get("part_of_speech", "")
+                selected_definition = selected[0].get("definition", "")
+                selected_part_of_speech = selected[0].get("part_of_speech", "")
+                use_api_examples = selected[1]
     elif cfg.get("data_source") == "cambridge":
         cambridge_html = _request_cambridge_html(word)
         if cambridge_html:
@@ -3098,9 +3210,10 @@ def enrich_current_browser_note(editor: Editor) -> None:
             if choices and not selected:
                 return
             if selected:
-                selected_definition = selected.get("definition", "")
-                selected_part_of_speech = selected.get("part_of_speech", "")
-                selected_meaning_type = selected.get("meaning_type", "")
+                selected_definition = selected[0].get("definition", "")
+                selected_part_of_speech = selected[0].get("part_of_speech", "")
+                selected_meaning_type = selected[0].get("meaning_type", "")
+                use_api_examples = selected[1]
             payload = cambridge_html
 
     result = _enrich_note(
@@ -3111,13 +3224,24 @@ def enrich_current_browser_note(editor: Editor) -> None:
         selected_definition=selected_definition,
         selected_part_of_speech=selected_part_of_speech,
         selected_meaning_type=selected_meaning_type,
+        use_api_examples=use_api_examples,
     )
-    if result == "updated":
+    if result in ("updated", "updated_examples_api_failed"):
         _refresh_editor_after_note_change(editor, working_note)
         if working_note.id:
             tooltip("Current note updated.")
         else:
             tooltip("Fields filled. Save or add the note to keep changes.")
+        if result == "updated_examples_api_failed":
+            showInfo(
+                "Note updated, but example generation failed.\n\n"
+                f"{LAST_EXAMPLES_ERROR or 'Unknown error.'}"
+            )
+    elif result == "examples_api_failed":
+        showInfo(
+            "Example generation failed.\n\n"
+            f"{LAST_EXAMPLES_ERROR or 'Unknown error.'}"
+        )
     elif result == "skipped":
         showInfo("Nothing changed (fields already filled or no values found).")
     elif result == "missing_source":
