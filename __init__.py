@@ -176,6 +176,7 @@ class BulkImageGenerationDialog(QDialog):
         self._api_url = cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)
         self._prompt_template = cfg.get("image_generation_prompt")
         self._token = cfg.get("api_keys", {}).get("image_generation", "")
+        self._model = cfg.get("image_generation_model", DEFAULT_IMAGE_GENERATION_MODEL)
 
         self.setWindowTitle("Generate images (bulk)")
         self.setWindowModality(Qt.WindowModality.WindowModal)
@@ -350,9 +351,10 @@ class BulkImageGenerationDialog(QDialog):
             )
             api_url = self._api_url
             token = self._token
+            model = self._model
 
-            def op(_col: Any, p=prompt, url=api_url, tok=token) -> Tuple[Optional[bytes], str]:
-                return _request_generated_image(p, url, tok)
+            def op(_col: Any, p=prompt, url=api_url, tok=token, m=model) -> Tuple[Optional[bytes], str]:
+                return _request_generated_image(p, url, tok, m)
 
             def on_success(result: Tuple[Optional[bytes], str], row_idx=idx) -> None:
                 self._on_row_result(row_idx, result, None)
@@ -497,6 +499,17 @@ DEFAULT_IMAGE_GENERATION_PROMPT = (
     "Simple composition, clear narrative, no text, no letters, no words. High quality, educational flashcard "
     "style, vibrant yet harmonious color palette."
 )
+IMAGE_GENERATION_MODELS = [
+    "krea/krea-2-medium",
+    "xai/grok-imagine-image-2.0",
+    "recraft/recraftv4-1-flash",
+    "bria/fibo-generate-1.5",
+    "google/nano-banana-2.1",
+    "openai/gpt-image-2.5-flare",
+    "black-forest-labs/flux-1-kontext-max",
+    "bytedance/seedream-5-pro",
+]
+DEFAULT_IMAGE_GENERATION_MODEL = "xai/grok-imagine-image-2.0"
 ENRICHED_CARD_FLAG = 7  # Purple flag (Ctrl+7 in Browser)
 DEFAULT_CONFIG = {
     "source_field": "Word",
@@ -528,6 +541,7 @@ DEFAULT_CONFIG = {
     "cambridge_usage_tag_map": {},
     "image_generation_api_url": DEFAULT_IMAGE_GENERATION_API_URL,
     "image_generation_prompt": DEFAULT_IMAGE_GENERATION_PROMPT,
+    "image_generation_model": DEFAULT_IMAGE_GENERATION_MODEL,
 }
 
 
@@ -2203,7 +2217,9 @@ def _reset_image_gen_cancel() -> None:
     _IMAGE_GEN_CANCEL_CONFIRMED = False
 
 
-def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Optional[bytes], str]:
+def _request_generated_image(
+    prompt: str, api_url: str, token: str, model: str
+) -> Tuple[Optional[bytes], str]:
     global LAST_IMAGE_GEN_ERROR
     LAST_IMAGE_GEN_ERROR = ""
     url = _clean(api_url) or DEFAULT_IMAGE_GENERATION_API_URL
@@ -2213,6 +2229,7 @@ def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Opt
             "prompt": prompt,
             "aspect_ratio": "1:1",
             "resolution": "1K",
+            "model": _clean(model) or DEFAULT_IMAGE_GENERATION_MODEL,
         }
     ).encode("utf-8")
     headers = {
@@ -2296,7 +2313,9 @@ def _request_generated_image(prompt: str, api_url: str, token: str) -> Tuple[Opt
     return data, content_type
 
 
-def _request_generated_image_v2(word: str, definition: str, api_url: str, token: str) -> Tuple[Optional[bytes], str]:
+def _request_generated_image_v2(
+    word: str, definition: str, api_url: str, token: str, model: str
+) -> Tuple[Optional[bytes], str]:
     """Call /generate-image endpoint that uses server-side LLM to build the prompt."""
     global LAST_IMAGE_GEN_ERROR
     LAST_IMAGE_GEN_ERROR = ""
@@ -2305,6 +2324,7 @@ def _request_generated_image_v2(word: str, definition: str, api_url: str, token:
         {
             "word": _clean(word),
             "definition": _clean(definition),
+            "model": _clean(model) or DEFAULT_IMAGE_GENERATION_MODEL,
         }
     ).encode("utf-8")
     headers = {
@@ -2769,6 +2789,15 @@ def _show_field_mapping_dialog(
     image_api_token.setText(cfg.get("api_keys", {}).get("image_generation", ""))
     form.addRow("Image API token:", image_api_token)
 
+    image_model_combo = QComboBox(dialog)
+    image_model_combo.addItems(IMAGE_GENERATION_MODELS)
+    current_image_model = cfg.get("image_generation_model", DEFAULT_IMAGE_GENERATION_MODEL)
+    if current_image_model in IMAGE_GENERATION_MODELS:
+        image_model_combo.setCurrentText(current_image_model)
+    else:
+        image_model_combo.setCurrentText(DEFAULT_IMAGE_GENERATION_MODEL)
+    form.addRow("Image generation model:", image_model_combo)
+
     image_prompt_edit = QTextEdit(dialog)
     image_prompt_edit.setPlainText(cfg.get("image_generation_prompt", DEFAULT_IMAGE_GENERATION_PROMPT))
     image_prompt_edit.setMinimumHeight(100)
@@ -2820,6 +2849,7 @@ def _show_field_mapping_dialog(
         "data_source": data_source_combo.currentText(),
         "image_generation_api_url": _clean(image_api_url.text()) or DEFAULT_IMAGE_GENERATION_API_URL,
         "image_generation_prompt": image_prompt_edit.toPlainText().strip() or DEFAULT_IMAGE_GENERATION_PROMPT,
+        "image_generation_model": image_model_combo.currentText() or DEFAULT_IMAGE_GENERATION_MODEL,
         "api_keys": {
             "wordnik": _clean(wordnik_key.text()),
             "merriam_webster": _clean(merriam_legacy_key.text()),
@@ -2839,6 +2869,7 @@ def _persist_field_choices(
     api_keys: Dict[str, str],
     image_generation_api_url: Optional[str] = None,
     image_generation_prompt: Optional[str] = None,
+    image_generation_model: Optional[str] = None,
 ) -> None:
     cfg["source_field"] = source_field
     cfg["field_map"] = field_map
@@ -2849,6 +2880,8 @@ def _persist_field_choices(
         cfg["image_generation_api_url"] = image_generation_api_url
     if image_generation_prompt is not None:
         cfg["image_generation_prompt"] = image_generation_prompt or DEFAULT_IMAGE_GENERATION_PROMPT
+    if image_generation_model is not None:
+        cfg["image_generation_model"] = image_generation_model or DEFAULT_IMAGE_GENERATION_MODEL
     mw.addonManager.writeConfig(__name__, cfg)
 
 
@@ -3338,6 +3371,7 @@ def generate_image_for_current_note(editor: Editor) -> None:
     )
     api_url = cfg.get("image_generation_api_url", DEFAULT_IMAGE_GENERATION_API_URL)
     token = cfg.get("api_keys", {}).get("image_generation", "")
+    model = cfg.get("image_generation_model", DEFAULT_IMAGE_GENERATION_MODEL)
     note_id = working_note.id
 
     _reset_image_gen_cancel()
@@ -3345,7 +3379,7 @@ def generate_image_for_current_note(editor: Editor) -> None:
     progress_dialog.show()
 
     def op(_col: Any) -> Tuple[Optional[bytes], str]:
-        return _request_generated_image(prompt, api_url, token)
+        return _request_generated_image(prompt, api_url, token, model)
 
     def finish_progress() -> None:
         if progress_dialog.isVisible():
@@ -3438,6 +3472,7 @@ def generate_image_v2_for_current_note(editor: Editor) -> None:
 
     api_url = _generate_image_api_url(cfg)
     token = cfg.get("api_keys", {}).get("image_generation", "")
+    model = cfg.get("image_generation_model", DEFAULT_IMAGE_GENERATION_MODEL)
     note_id = working_note.id
 
     _reset_image_gen_cancel()
@@ -3445,7 +3480,7 @@ def generate_image_v2_for_current_note(editor: Editor) -> None:
     progress_dialog.show()
 
     def op(_col: Any) -> Tuple[Optional[bytes], str]:
-        return _request_generated_image_v2(word, definition, api_url, token)
+        return _request_generated_image_v2(word, definition, api_url, token, model)
 
     def finish_progress() -> None:
         if progress_dialog.isVisible():
@@ -3663,6 +3698,7 @@ def open_browser_settings(browser: Browser) -> None:
         choices["api_keys"],
         choices.get("image_generation_api_url"),
         choices.get("image_generation_prompt"),
+        choices.get("image_generation_model"),
     )
     tooltip("Settings saved.")
 
