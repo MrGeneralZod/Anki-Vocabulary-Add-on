@@ -2012,3 +2012,28 @@ body:is(.nightMode, .night_mode) .note-tag {
     transform: rotate(360deg);
   }
 }
+
+/* ーーー Reverse card (Remember / Forgot) ーーー */
+
+.card-content.front.reverse-card .mem-question {
+  margin: 1.25rem 0 1.5rem !important;
+  text-align: center;
+}
+
+.card-content.front.reverse-card .reverse-word {
+  font-size: clamp(1.75rem, 5vw, 2.5rem);
+  font-weight: 700;
+  line-height: 1.25;
+  word-break: break-word;
+}
+
+.card-content.front.reverse-card[mode="mchoice"] #scr-keyboard {
+  margin-top: 1.25rem;
+  max-width: 28rem;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.card-content.front.reverse-card[mode="mchoice"] #scr-keyboard > .membtn {
+  min-height: 3.25rem;
+}
