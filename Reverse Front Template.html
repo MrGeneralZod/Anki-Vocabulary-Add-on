@@ -12,6 +12,12 @@
 	<div class="mem-question no-alts memblob">
 		<div class="reverse-word">{{Learnable}}</div>
 		{{#Part of speech}}<div class="pos-front-field">{{Part of speech}}</div>{{/Part of speech}}
+		{{#Examples}}
+		<div class="mem-field no-alts reverse-examples">
+			<label>Examples</label>
+			<div>{{Examples}}</div>
+		</div>
+		{{/Examples}}
 	</div>
 
 	<div class="mem-typing">
@@ -698,14 +704,18 @@ if (path.getAttribute('d')) return;
 </script>
 <script>
 (function () {
-  if (typeof isFrontSide === 'undefined' || !isFrontSide) return;
+  if (!document.querySelector('.reverse-card')) return;
   const kb = document.getElementById('scr-keyboard');
   if (!kb) return;
   const buttons = [...kb.querySelectorAll('.membtn')];
   const forgot = buttons.find((b) => b.innerHTML === 'Forgot');
   const remember = buttons.find((b) => b.innerHTML === 'Remember');
   if (!forgot || !remember) return;
-  kb.appendChild(forgot);
+  remember.classList.add('reverse-btn-remember');
+  forgot.classList.add('reverse-btn-forgot');
   kb.appendChild(remember);
+  kb.appendChild(forgot);
+  // Keep evaluation side in the same order (back rebuilds from this key).
+  sessionStorage.setItem('card-keyboard', 'Remember|Forgot');
 })();
 </script>

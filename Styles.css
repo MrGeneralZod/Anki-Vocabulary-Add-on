@@ -2027,6 +2027,37 @@ body:is(.nightMode, .night_mode) .note-tag {
   word-break: break-word;
 }
 
+.card-content.front.reverse-card .reverse-examples {
+  margin-top: 1rem !important;
+  margin-bottom: 0 !important;
+  text-align: left;
+  max-width: 36rem;
+  margin-left: auto;
+  margin-right: auto;
+  font-size: 0.92em;
+  opacity: 0.9;
+}
+
+.card-content.front.reverse-card .reverse-examples label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.7;
+  text-align: center;
+}
+
+.card-content.front.reverse-card .reverse-examples ul {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.card-content.front.reverse-card .reverse-examples li {
+  margin: 0.25rem 0;
+}
+
 .card-content.front.reverse-card[mode="mchoice"] #scr-keyboard {
   margin-top: 1.25rem;
   max-width: 28rem;
@@ -2036,4 +2067,28 @@ body:is(.nightMode, .night_mode) .note-tag {
 
 .card-content.front.reverse-card[mode="mchoice"] #scr-keyboard > .membtn {
   min-height: 3.25rem;
+}
+
+.card-content.front.reverse-card #scr-keyboard > .membtn.reverse-btn-remember {
+  background: #dcfce7;
+  border: 2px solid #16a34a;
+  color: #166534;
+}
+
+.card-content.front.reverse-card #scr-keyboard > .membtn.reverse-btn-forgot {
+  background: #fee2e2;
+  border: 2px solid #dc2626;
+  color: #991b1b;
+}
+
+body:is(.nightMode, .night_mode) .card-content.front.reverse-card #scr-keyboard > .membtn.reverse-btn-remember {
+  background: #14532d;
+  border-color: #22c55e;
+  color: #bbf7d0;
+}
+
+body:is(.nightMode, .night_mode) .card-content.front.reverse-card #scr-keyboard > .membtn.reverse-btn-forgot {
+  background: #7f1d1d;
+  border-color: #f87171;
+  color: #fecaca;
 }
